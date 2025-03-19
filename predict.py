@@ -14,9 +14,9 @@ class Predictor(BasePredictor):
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # Adjust exposure (-1 in Lightroom scale ≈ -20% brightness)
+        # Adjust exposure (-1 in Lightroom scale ≈ -15% brightness)
         enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.80)
+        img = enhancer.enhance(0.60)
         
         # Adjust contrast (+25 in Lightroom scale ≈ 25% increase)
         enhancer = ImageEnhance.Contrast(img)
