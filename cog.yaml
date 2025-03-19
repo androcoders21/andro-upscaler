@@ -1,0 +1,19 @@
+build:
+  gpu: true
+  cuda: "11.8"
+  python_version: "3.11"
+  system_packages:
+    - "libgl1-mesa-glx"
+    - "libglib2.0-0"
+  python_packages:
+    - "torch==2.1.0"
+    - "diffusers>=0.27.0"
+    - "transformers>=4.36.0"
+    - "accelerate>=0.25.0"
+    - "pillow==10.0.1"
+    - "numpy==1.25.2"
+    - "huggingface-hub"
+    - "protobuf>=5.29.2"
+    - "sentencepiece>=0.1.99"
+
+predict: "predict.py:Predictor"
