@@ -150,22 +150,18 @@ class ImageUpscaler:
     def setup(self):
         print("\nLoading the model into memory")
         
-        # Model parallelism setup
+        # Model sharding setup
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
-            # Distribute components across GPUs
-            gpu_ids = list(range(num_gpus))
-            controlnet_gpu = gpu_ids[0]  # First GPU for controlnet
-            pipe_gpu = gpu_ids[1]  # Second GPU for pipeline
-            print(f"Using GPU {controlnet_gpu} for ControlNet and GPU {pipe_gpu} for Pipeline")
-            
-            torch.cuda.set_device(controlnet_gpu)
+            print(f"Enabling model sharding across {num_gpus} GPUs")
+            # We'll shard the model across all available GPUs
+            self.devices = [f"cuda:{i}" for i in range(num_gpus)]
         else:
-            controlnet_gpu = 0
-            pipe_gpu = 0
-            torch.cuda.set_device(0)
+            self.devices = ["cuda:0"]
+            print("Single GPU mode")
         
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Set primary device
+        self.device = self.devices[0]
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
@@ -191,29 +187,38 @@ class ImageUpscaler:
         gc.collect()
         
         try:
-            print("Loading ControlNet on GPU", controlnet_gpu)
-            with torch.cuda.device(controlnet_gpu):
-                with torch.cuda.amp.autocast():
-                    self.controlnet = FluxControlNetModel.from_pretrained(
-                        "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                        torch_dtype=torch.float16,
-                        low_cpu_mem_usage=True
-                    ).to(f"cuda:{controlnet_gpu}")
-            
-            print("Loading Pipeline on GPU", pipe_gpu)
-            with torch.cuda.device(pipe_gpu):
-                with torch.cuda.amp.autocast():
-                    self.pipe = FluxControlNetPipeline.from_pretrained(
-                        model_path,
-                        controlnet=self.controlnet,
-                        torch_dtype=torch.float16,
-                        low_cpu_mem_usage=True
-                    ).to(f"cuda:{pipe_gpu}")
-                    
-                    # Memory optimizations
-                    self.pipe.enable_attention_slicing(1)
-                    self.pipe.enable_model_cpu_offload()
+            # Clear memory before loading
+            for device in self.devices:
+                with torch.cuda.device(device.split(':')[1]):
                     torch.cuda.empty_cache()
+                    gc.collect()
+
+            print("Loading model components...")
+            with torch.cuda.amp.autocast():
+                # Load controlnet with model sharding
+                self.controlnet = FluxControlNetModel.from_pretrained(
+                    "jasperai/Flux.1-dev-Controlnet-Upscaler",
+                    torch_dtype=torch.float16,
+                    device_map="auto",  # Automatically distribute across GPUs
+                    low_cpu_mem_usage=True
+                )
+                
+                # Load pipeline with model sharding
+                self.pipe = FluxControlNetPipeline.from_pretrained(
+                    model_path,
+                    controlnet=self.controlnet,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    low_cpu_mem_usage=True
+                )
+                
+                # Enable memory optimizations
+                self.pipe.enable_attention_slicing(1)
+                self.pipe.enable_model_cpu_offload()
+                
+            # Clear memory again after loading
+            torch.cuda.empty_cache()
+            gc.collect()
         except Exception as e:
             print(f"Error during model loading: {str(e)}")
             raise
