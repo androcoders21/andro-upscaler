@@ -14,6 +14,8 @@ import gc
 import pynvml
 import argparse
 from pathlib import Path
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 class MemoryMonitor:
     def __init__(self):
@@ -81,7 +83,11 @@ class ImageUpscaler:
             used = torch.cuda.memory_allocated(i) / 1e9
             print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
 
-    def __init__(self):
+    def __init__(self, local_rank=-1):
+        # Initialize distributed setup if needed
+        self.local_rank = local_rank
+        self.distributed = local_rank != -1
+        
         # Initialize CUDA and clear cache
         torch.cuda.empty_cache()
         gc.collect()
@@ -143,11 +149,22 @@ class ImageUpscaler:
 
     def setup(self):
         print("\nLoading the model into memory")
-        if torch.cuda.device_count() > 1:
-            print(f"Enabling multi-GPU support with {torch.cuda.device_count()} GPUs")
-            # Set default device to first GPU
-            torch.cuda.set_device(0)
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Handle distributed setup if enabled
+        if self.distributed:
+            # Use the GPU corresponding to local_rank
+            torch.cuda.set_device(self.local_rank)
+            self.device = torch.device("cuda", self.local_rank)
+            # Initialize the process group
+            dist.init_process_group(backend="nccl")
+            print(f"Running on GPU {self.local_rank} in distributed mode")
+        else:
+            # Normal single-process multi-GPU setup
+            if torch.cuda.device_count() > 1:
+                print(f"Found {torch.cuda.device_count()} GPUs, but running in single-process mode")
+                # Set default device to first GPU
+                torch.cuda.set_device(0)
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
@@ -176,9 +193,13 @@ class ImageUpscaler:
                     torch_dtype=torch.float16  # Use float16 instead of bfloat16 for better memory efficiency
                 ).to(self.device)
                 
-                # Enable multi-GPU for controlnet if available
-                if torch.cuda.device_count() > 1:
-                    self.controlnet = torch.nn.DataParallel(self.controlnet)
+                # Wrap with DDP if in distributed mode
+                if self.distributed:
+                    self.controlnet = DDP(
+                        self.controlnet, 
+                        device_ids=[self.local_rank],
+                        output_device=self.local_rank
+                    )
                 
                 # Load pipeline with memory optimization
                 self.pipe = FluxControlNetPipeline.from_pretrained(
@@ -188,9 +209,13 @@ class ImageUpscaler:
                     low_cpu_mem_usage=True
                 ).to(self.device)
                 
-                # Enable multi-GPU for pipeline components if available
-                if torch.cuda.device_count() > 1:
-                    self.pipe.unet = torch.nn.DataParallel(self.pipe.unet)
+                # Wrap unet with DDP if in distributed mode
+                if self.distributed:
+                    self.pipe.unet = DDP(
+                        self.pipe.unet, 
+                        device_ids=[self.local_rank],
+                        output_device=self.local_rank
+                    )
                     
                 # Additional memory optimizations
                 self.pipe.enable_attention_slicing()
@@ -288,10 +313,11 @@ def main():
     parser.add_argument("--upscale-factor", type=int, default=4, help="Upscale factor (1-4)")
     parser.add_argument("--controlnet-scale", type=float, default=0.6, help="ControlNet conditioning scale (0.1-1.5)")
     parser.add_argument("--seed", type=int, help="Random seed (optional)")
+    parser.add_argument("--local-rank", type=int, default=-1, help="Local rank for distributed training")
 
     args = parser.parse_args()
 
-    upscaler = ImageUpscaler()
+    upscaler = ImageUpscaler(local_rank=args.local_rank)
     output_path = upscaler.upscale(
         args.input_image,
         args.output,
