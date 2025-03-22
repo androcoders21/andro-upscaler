@@ -71,8 +71,20 @@ class MemoryMonitor:
             self.thread.join()
 
 class ImageUpscaler:
+    def print_gpu_memory(self):
+        for i in range(torch.cuda.device_count()):
+            total = torch.cuda.get_device_properties(i).total_memory / 1e9
+            used = torch.cuda.memory_allocated(i) / 1e9
+            print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
+
     def __init__(self):
         self.memory_monitor = MemoryMonitor()
+        # Clear any existing cache
+        torch.cuda.empty_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            print(f"\nFound {torch.cuda.device_count()} GPUs!")
+            self.print_gpu_memory()
         self.setup()
 
     def apply_cc_effects(self, img: Image.Image) -> Image.Image:
@@ -120,6 +132,8 @@ class ImageUpscaler:
 
     def setup(self):
         print("\nLoading the model into memory")
+        if torch.cuda.device_count() > 1:
+            print(f"Enabling multi-GPU support with {torch.cuda.device_count()} GPUs")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         print("Authenticating with HuggingFace")
@@ -138,16 +152,31 @@ class ImageUpscaler:
         )
         
         print("Loading pipeline components")
+        # Load controlnet
         self.controlnet = FluxControlNetModel.from_pretrained(
             "jasperai/Flux.1-dev-Controlnet-Upscaler",
             torch_dtype=torch.bfloat16
         ).to(self.device)
         
+        # Enable multi-GPU for controlnet if available
+        if torch.cuda.device_count() > 1:
+            self.controlnet = torch.nn.DataParallel(self.controlnet)
+        
+        # Load pipeline
         self.pipe = FluxControlNetPipeline.from_pretrained(
             model_path,
             controlnet=self.controlnet,
             torch_dtype=torch.bfloat16 
         ).to(self.device)
+        
+        # Enable multi-GPU for pipeline components if available
+        if torch.cuda.device_count() > 1:
+            self.pipe.unet = torch.nn.DataParallel(self.pipe.unet)
+            
+        # Print GPU memory usage after loading
+        if torch.cuda.is_available():
+            print("\nGPU memory usage after model loading:")
+            self.print_gpu_memory()
 
     def process_input(self, input_image: Image.Image) -> Image.Image:
         print("Processing input image dimensions")
@@ -214,6 +243,12 @@ class ImageUpscaler:
         output_path = Path(output_path)
         output_image = output_image.resize(original_size, Image.LANCZOS)
         output_image.save(output_path)
+        
+        # Print final GPU memory usage
+        if torch.cuda.is_available():
+            print("\nFinal GPU memory usage:")
+            self.print_gpu_memory()
+            
         return str(output_path)
 
 def main():
