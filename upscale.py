@@ -150,18 +150,15 @@ class ImageUpscaler:
     def setup(self):
         print("\nLoading the model into memory")
         
-        # Model sharding setup
+        # Initialize devices
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
             print(f"Enabling model sharding across {num_gpus} GPUs")
-            # We'll shard the model across all available GPUs
-            self.devices = [f"cuda:{i}" for i in range(num_gpus)]
         else:
-            self.devices = ["cuda:0"]
             print("Single GPU mode")
         
-        # Set primary device
-        self.device = self.devices[0]
+        # Set device
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
@@ -187,28 +184,22 @@ class ImageUpscaler:
         gc.collect()
         
         try:
-            # Clear memory before loading
-            for device in self.devices:
-                with torch.cuda.device(device.split(':')[1]):
-                    torch.cuda.empty_cache()
-                    gc.collect()
-
             print("Loading model components...")
-            with torch.cuda.amp.autocast():
-                # Load controlnet with model sharding
+            # Load models with accelerate's auto device map
+            from accelerate import init_empty_weights
+            from accelerate.utils import set_module_tensor_to_device
+            
+            with init_empty_weights():
                 self.controlnet = FluxControlNetModel.from_pretrained(
                     "jasperai/Flux.1-dev-Controlnet-Upscaler",
                     torch_dtype=torch.float16,
-                    device_map="auto",  # Automatically distribute across GPUs
                     low_cpu_mem_usage=True
                 )
                 
-                # Load pipeline with model sharding
                 self.pipe = FluxControlNetPipeline.from_pretrained(
                     model_path,
                     controlnet=self.controlnet,
                     torch_dtype=torch.float16,
-                    device_map="auto",
                     low_cpu_mem_usage=True
                 )
                 
