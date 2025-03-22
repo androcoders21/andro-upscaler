@@ -6,8 +6,82 @@ from diffusers.models import FluxControlNetModel
 from diffusers.pipelines import FluxControlNetPipeline
 from PIL import Image, ImageEnhance, ImageFilter
 import warnings
+import threading
+import time
+import psutil
+import gc
+import pynvml
+
+class MemoryMonitor:
+    def __init__(self):
+        self.keep_running = False
+        self.thread = None
+        if torch.cuda.is_available():
+            pynvml.nvmlInit()
+            self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+
+    def get_memory_stats(self):
+        # Get physical RAM stats (RSS - Resident Set Size)
+        ram = psutil.Process().memory_info()
+        ram_total = psutil.virtual_memory().total / (1024 ** 3)  # Convert to GB
+        ram_used = ram.rss / (1024 ** 3)  # Physical memory used
+
+        # Get CPU usage
+        cpu_percent = psutil.cpu_percent()
+
+        stats = {
+            'ram_used': ram_used,
+            'ram_total': ram_total,
+            'cpu_percent': cpu_percent
+        }
+        
+        if torch.cuda.is_available():
+            # Get GPU stats
+            gpu_used = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
+            gpu_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # GB
+            
+            # Get GPU utilization percentage
+            gpu_util = pynvml.nvmlDeviceGetUtilizationRates(self.handle).gpu
+
+            stats.update({
+                'gpu_used': gpu_used,
+                'gpu_total': gpu_total,
+                'gpu_util': gpu_util
+            })
+        
+        return stats
+
+    def monitor_memory(self):
+        while self.keep_running:
+            stats = self.get_memory_stats()
+            if torch.cuda.is_available():
+                vram_info = f"VRAM: {stats['gpu_used']:.1f}GB/{stats['gpu_total']:.1f}GB"
+                gpu_info = f"GPU Usage: {stats['gpu_util']}%"
+            else:
+                vram_info = "VRAM: N/A"
+                gpu_info = "GPU: N/A"
+                
+            ram_info = f"Physical RAM: {stats['ram_used']:.1f}GB/{stats['ram_total']:.1f}GB"
+            cpu_info = f"CPU: {stats['cpu_percent']}%"
+            
+            print(f"{vram_info}, {gpu_info}, {ram_info}, {cpu_info}")
+            
+            time.sleep(3)
+
+    def start_monitoring(self):
+        self.keep_running = True
+        self.thread = threading.Thread(target=self.monitor_memory)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def stop_monitoring(self):
+        self.keep_running = False
+        if self.thread:
+            self.thread.join()
 
 class Predictor(BasePredictor):
+    def __init__(self):
+        self.memory_monitor = MemoryMonitor()
     def apply_cc_effects(self, img: Image.Image) -> Image.Image:
         print("Applying CC effects")
         # Convert to RGB if needed
@@ -28,8 +102,37 @@ class Predictor(BasePredictor):
         
         return img
 
+    def print_system_info(self):
+        print("\nSystem Information:")
+        # Print CPU information
+        try:
+            import platform
+            if platform.system() == "Linux":
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if "model name" in line:
+                            cpu_name = line.split(":")[1].strip()
+                            print(f"CPU: {cpu_name}")
+                            break
+            elif platform.system() == "Windows":
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0]
+                print(f"CPU: {cpu_name}")
+                winreg.CloseKey(key)
+        except:
+            print("CPU: Information not available")
+
+        # Print GPU information
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_total_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            print(f"GPU: {gpu_name} ({gpu_total_mem:.1f}GB)")
+        else:
+            print("GPU: Not available")
+
     def setup(self) -> None:
-        print("Loading the model into memory to make running multiple predictions efficient")
+        print("\nLoading the model into memory to make running multiple predictions efficient")
         if torch.cuda.is_available():
             self.device = "cuda"
         else:
@@ -101,6 +204,10 @@ class Predictor(BasePredictor):
             ge=1.0,
             le=20.0,
         ),
+         apply_cc_preset: bool = Input(
+            description="Applying Color Correction ",
+            default=False,
+        ),
         num_inference_steps: int = Input(
             description="Number of denoising steps",
             default=28,
@@ -123,15 +230,12 @@ class Predictor(BasePredictor):
             description="Random seed. Leave blank to randomize the seed",
             default=None,
         ),
-        apply_cc_preset: bool = Input(
-            description="Apply CC Preset effect to image",
-            default=False,
-        ),
     ) -> Path:
         """Run a single prediction on the model"""
         if seed is None:
             seed = int(torch.randint(0, 1000000, (1,))[0].item())
         
+        self.print_system_info()
         print(f"Seed: {seed}")
         
         input_image = Image.open(input_image).convert("RGB")
@@ -146,8 +250,10 @@ class Predictor(BasePredictor):
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        print("Generating upscaled image")
-        output_image = self.pipe(
+        print("Upscaling Started, Starting memory monitoring...")
+        self.memory_monitor.start_monitoring()
+        try:
+            output_image = self.pipe(
             prompt=prompt,
             control_image=control_image,
             controlnet_conditioning_scale=controlnet_conditioning_scale,
@@ -157,6 +263,12 @@ class Predictor(BasePredictor):
             width=control_image.size[0],
             generator=generator,
         ).images[0]
+        finally:
+            print("Stopping memory monitoring...")
+            self.memory_monitor.stop_monitoring()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Apply CC effects to upscaled image if enabled
         if apply_cc_preset:
