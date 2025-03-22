@@ -5,6 +5,11 @@ from diffusers.models import FluxControlNetModel
 # Set memory management configuration
 torch.backends.cudnn.benchmark = True
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+try:
+    import deepspeed
+except ImportError:
+    os.system('pip install deepspeed')
+    import deepspeed
 from diffusers.pipelines import FluxControlNetPipeline
 from PIL import Image, ImageEnhance
 import threading
@@ -150,62 +155,72 @@ class ImageUpscaler:
     def setup(self):
         print("\nLoading the model into memory")
         
-        # Initialize devices
+        # DeepSpeed initialization
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
-            print(f"Enabling model sharding across {num_gpus} GPUs")
+            print(f"Initializing DeepSpeed with {num_gpus} GPUs")
+            # DeepSpeed configuration
+            ds_config = {
+                "fp16": {"enabled": True},
+                "zero_optimization": {
+                    "stage": 3,
+                    "overlap_comm": True,
+                    "contiguous_gradients": True,
+                    "reduce_bucket_size": 5e7
+                },
+                "train_batch_size": 1
+            }
+            deepspeed.init_distributed()
         else:
             print("Single GPU mode")
         
         # Set device
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
         
-        print("Authenticating with HuggingFace")
-        from huggingface_hub import login, snapshot_download
-        
-        hf_token = "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"
-        if hf_token:
-            login(token=hf_token)
-
-        model_path = snapshot_download(
-            repo_id="black-forest-labs/FLUX.1-dev",
-            repo_type="model",
-            ignore_patterns=["*.md", "*.gitattributes"],
-            local_dir="FLUX.1-dev",
-            token=hf_token,
-        )
-        
-        print("Loading pipeline components")
-        # Set aggressive memory optimization
         torch.cuda.empty_cache()
         gc.collect()
         
         try:
-            print("Loading model components...")
-            # Load models with accelerate's auto device map
-            from accelerate import init_empty_weights
-            from accelerate.utils import set_module_tensor_to_device
+            print("Loading model components with pipeline parallelism...")
+            # Load base controlnet model
+            self.controlnet = FluxControlNetModel.from_pretrained(
+                "jasperai/Flux.1-dev-Controlnet-Upscaler",
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True
+            )
+
+            # Load pipeline with model sharding
+            self.pipe = FluxControlNetPipeline.from_pretrained(
+                model_path,
+                controlnet=self.controlnet,
+                torch_dtype=torch.float16,
+                variant="fp16",
+                use_safetensors=True
+            )
+
+            # Enable memory optimizations
+            if torch.cuda.device_count() > 1:
+                # Split modules across GPUs
+                devices = list(range(torch.cuda.device_count()))
+                self.pipe.text_encoder = self.pipe.text_encoder.to(f'cuda:{devices[0]}')
+                self.pipe.vae = self.pipe.vae.to(f'cuda:{devices[1]}')
+                self.pipe.unet = self.pipe.unet.to(f'cuda:{devices[2]}')
+                self.controlnet = self.controlnet.to(f'cuda:{devices[3]}')
+                self.pipe.safety_checker = self.pipe.safety_checker.to(f'cuda:{devices[4]}' if len(devices) > 4 else 'cuda:0')
+                self.pipe.feature_extractor = self.pipe.feature_extractor.to(f'cuda:{devices[5]}' if len(devices) > 5 else 'cuda:0')
+            else:
+                self.pipe = self.pipe.to(self.device)
+                
+            # Enable additional memory optimizations
+            self.pipe.enable_attention_slicing(1)
             
-            with init_empty_weights():
-                self.controlnet = FluxControlNetModel.from_pretrained(
-                    "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True
-                )
-                
-                self.pipe = FluxControlNetPipeline.from_pretrained(
-                    model_path,
-                    controlnet=self.controlnet,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True
-                )
-                
-                # Enable memory optimizations
-                self.pipe.enable_attention_slicing(1)
-                self.pipe.enable_model_cpu_offload()
+            # Clear cache
+            torch.cuda.empty_cache()
+            gc.collect()
                 
             # Clear memory again after loading
             torch.cuda.empty_cache()
