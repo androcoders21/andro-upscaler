@@ -150,21 +150,22 @@ class ImageUpscaler:
     def setup(self):
         print("\nLoading the model into memory")
         
-        # Handle distributed setup if enabled
-        if self.distributed:
-            # Use the GPU corresponding to local_rank
-            torch.cuda.set_device(self.local_rank)
-            self.device = torch.device("cuda", self.local_rank)
-            # Initialize the process group
-            dist.init_process_group(backend="nccl")
-            print(f"Running on GPU {self.local_rank} in distributed mode")
+        # Model parallelism setup
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            # Distribute components across GPUs
+            gpu_ids = list(range(num_gpus))
+            controlnet_gpu = gpu_ids[0]  # First GPU for controlnet
+            pipe_gpu = gpu_ids[1]  # Second GPU for pipeline
+            print(f"Using GPU {controlnet_gpu} for ControlNet and GPU {pipe_gpu} for Pipeline")
+            
+            torch.cuda.set_device(controlnet_gpu)
         else:
-            # Normal single-process multi-GPU setup
-            if torch.cuda.device_count() > 1:
-                print(f"Found {torch.cuda.device_count()} GPUs, but running in single-process mode")
-                # Set default device to first GPU
-                torch.cuda.set_device(0)
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            controlnet_gpu = 0
+            pipe_gpu = 0
+            torch.cuda.set_device(0)
+        
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
@@ -185,41 +186,34 @@ class ImageUpscaler:
         )
         
         print("Loading pipeline components")
+        # Set aggressive memory optimization
+        torch.cuda.empty_cache()
+        gc.collect()
+        
         try:
-            # Load controlnet with memory optimization
-            with torch.cuda.amp.autocast():
-                self.controlnet = FluxControlNetModel.from_pretrained(
-                    "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                    torch_dtype=torch.float16  # Use float16 instead of bfloat16 for better memory efficiency
-                ).to(self.device)
-                
-                # Wrap with DDP if in distributed mode
-                if self.distributed:
-                    self.controlnet = DDP(
-                        self.controlnet, 
-                        device_ids=[self.local_rank],
-                        output_device=self.local_rank
-                    )
-                
-                # Load pipeline with memory optimization
-                self.pipe = FluxControlNetPipeline.from_pretrained(
-                    model_path,
-                    controlnet=self.controlnet,
-                    torch_dtype=torch.float16,  # Use float16 instead of bfloat16
-                    low_cpu_mem_usage=True
-                ).to(self.device)
-                
-                # Wrap unet with DDP if in distributed mode
-                if self.distributed:
-                    self.pipe.unet = DDP(
-                        self.pipe.unet, 
-                        device_ids=[self.local_rank],
-                        output_device=self.local_rank
-                    )
+            print("Loading ControlNet on GPU", controlnet_gpu)
+            with torch.cuda.device(controlnet_gpu):
+                with torch.cuda.amp.autocast():
+                    self.controlnet = FluxControlNetModel.from_pretrained(
+                        "jasperai/Flux.1-dev-Controlnet-Upscaler",
+                        torch_dtype=torch.float16,
+                        low_cpu_mem_usage=True
+                    ).to(f"cuda:{controlnet_gpu}")
+            
+            print("Loading Pipeline on GPU", pipe_gpu)
+            with torch.cuda.device(pipe_gpu):
+                with torch.cuda.amp.autocast():
+                    self.pipe = FluxControlNetPipeline.from_pretrained(
+                        model_path,
+                        controlnet=self.controlnet,
+                        torch_dtype=torch.float16,
+                        low_cpu_mem_usage=True
+                    ).to(f"cuda:{pipe_gpu}")
                     
-                # Additional memory optimizations
-                self.pipe.enable_attention_slicing()
-                self.pipe.enable_sequential_cpu_offload()
+                    # Memory optimizations
+                    self.pipe.enable_attention_slicing(1)
+                    self.pipe.enable_model_cpu_offload()
+                    torch.cuda.empty_cache()
         except Exception as e:
             print(f"Error during model loading: {str(e)}")
             raise
