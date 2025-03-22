@@ -1,6 +1,10 @@
+import os
 import torch
 import numpy as np
 from diffusers.models import FluxControlNetModel
+# Set memory management configuration
+torch.backends.cudnn.benchmark = True
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 from diffusers.pipelines import FluxControlNetPipeline
 from PIL import Image, ImageEnhance
 import threading
@@ -78,13 +82,20 @@ class ImageUpscaler:
             print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
 
     def __init__(self):
-        self.memory_monitor = MemoryMonitor()
-        # Clear any existing cache
+        # Initialize CUDA and clear cache
         torch.cuda.empty_cache()
         gc.collect()
+        
         if torch.cuda.is_available():
-            print(f"\nFound {torch.cuda.device_count()} GPUs!")
+            n_gpus = torch.cuda.device_count()
+            print(f"\nFound {n_gpus} GPUs!")
+            # Initialize all GPUs
+            for i in range(n_gpus):
+                with torch.cuda.device(i):
+                    torch.cuda.empty_cache()
             self.print_gpu_memory()
+        
+        self.memory_monitor = MemoryMonitor()
         self.setup()
 
     def apply_cc_effects(self, img: Image.Image) -> Image.Image:
@@ -134,7 +145,12 @@ class ImageUpscaler:
         print("\nLoading the model into memory")
         if torch.cuda.device_count() > 1:
             print(f"Enabling multi-GPU support with {torch.cuda.device_count()} GPUs")
+            # Set default device to first GPU
+            torch.cuda.set_device(0)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Set gradient optimization
+        torch.set_grad_enabled(False)
         
         print("Authenticating with HuggingFace")
         from huggingface_hub import login, snapshot_download
@@ -152,26 +168,36 @@ class ImageUpscaler:
         )
         
         print("Loading pipeline components")
-        # Load controlnet
-        self.controlnet = FluxControlNetModel.from_pretrained(
-            "jasperai/Flux.1-dev-Controlnet-Upscaler",
-            torch_dtype=torch.bfloat16
-        ).to(self.device)
-        
-        # Enable multi-GPU for controlnet if available
-        if torch.cuda.device_count() > 1:
-            self.controlnet = torch.nn.DataParallel(self.controlnet)
-        
-        # Load pipeline
-        self.pipe = FluxControlNetPipeline.from_pretrained(
-            model_path,
-            controlnet=self.controlnet,
-            torch_dtype=torch.bfloat16 
-        ).to(self.device)
-        
-        # Enable multi-GPU for pipeline components if available
-        if torch.cuda.device_count() > 1:
-            self.pipe.unet = torch.nn.DataParallel(self.pipe.unet)
+        try:
+            # Load controlnet with memory optimization
+            with torch.cuda.amp.autocast():
+                self.controlnet = FluxControlNetModel.from_pretrained(
+                    "jasperai/Flux.1-dev-Controlnet-Upscaler",
+                    torch_dtype=torch.float16  # Use float16 instead of bfloat16 for better memory efficiency
+                ).to(self.device)
+                
+                # Enable multi-GPU for controlnet if available
+                if torch.cuda.device_count() > 1:
+                    self.controlnet = torch.nn.DataParallel(self.controlnet)
+                
+                # Load pipeline with memory optimization
+                self.pipe = FluxControlNetPipeline.from_pretrained(
+                    model_path,
+                    controlnet=self.controlnet,
+                    torch_dtype=torch.float16,  # Use float16 instead of bfloat16
+                    low_cpu_mem_usage=True
+                ).to(self.device)
+                
+                # Enable multi-GPU for pipeline components if available
+                if torch.cuda.device_count() > 1:
+                    self.pipe.unet = torch.nn.DataParallel(self.pipe.unet)
+                    
+                # Additional memory optimizations
+                self.pipe.enable_attention_slicing()
+                self.pipe.enable_sequential_cpu_offload()
+        except Exception as e:
+            print(f"Error during model loading: {str(e)}")
+            raise
             
         # Print GPU memory usage after loading
         if torch.cuda.is_available():
