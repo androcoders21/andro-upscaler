@@ -1,6 +1,6 @@
 import os
 import torch
-import numpy as np
+import numpy2 as np
 from diffusers.models import FluxControlNetModel
 # Set memory management configuration
 torch.backends.cudnn.benchmark = True
@@ -263,8 +263,25 @@ class ImageUpscaler:
         input_image = self.process_input(input_image)
 
         w, h = input_image.size
-        control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
-
+        
+        # Calculate target size based on upscale factor
+        target_width = w * upscale_factor
+        target_height = h * upscale_factor
+        
+        # Ensure dimensions are divisible by 8 for efficiency
+        target_width = target_width - target_width % 8
+        target_height = target_height - target_height % 8
+        
+        control_image = input_image.resize((target_width, target_height), Image.LANCZOS)
+        
+        # Use deterministic generation with synchronization across GPUs if distributed
+        if self.distributed:
+            # Make sure all processes use the same seed
+            seed = seed if seed is not None else 42
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+        
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
         print("Upscaling Started, Starting memory monitoring...")
