@@ -1,0 +1,11 @@
+torch==2.1.0
+diffusers>=0.27.0
+transformers>=4.36.0
+accelerate>=0.25.0
+pillow==10.0.1
+numpy==1.25.2
+huggingface-hub
+protobuf>=5.29.2
+sentencepiece>=0.1.99
+psutil>=5.9.0
+pynvml>=12.0.0
