@@ -176,35 +176,50 @@ class ImageUpscaler:
         try:
             print("Loading model components with optimizations...")
             
-            # Memory optimization config
-            model_config = {
-                "torch_dtype": torch.float16,
-                "low_cpu_mem_usage": True,
-                "use_safetensors": True,
-                "device_map": "auto" if num_gpus > 1 else self.device
-            }
-            
-            # Load controlnet with optimizations
+            # Load models with optimizations
+            print("Loading ControlNet...")
             self.controlnet = FluxControlNetModel.from_pretrained(
                 "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                **model_config
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                use_safetensors=True
             )
-            
-            # Load pipeline with optimizations
+
+            print("Loading Pipeline...")
             self.pipe = FluxControlNetPipeline.from_pretrained(
                 model_path,
                 controlnet=self.controlnet,
-                **model_config
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                use_safetensors=True
             )
-            
-            # Enable memory efficient optimizations
-            self.pipe.enable_attention_slicing(slice_size="auto")
-            self.pipe.enable_sequential_cpu_offload()
+
+            if num_gpus > 1:
+                print("Distributing model across GPUs...")
+                # Distribute components across GPUs
+                device_map = {
+                    0: ["text_encoder"],
+                    1: ["vae"],
+                    2: ["unet"],
+                    3: ["controlnet"],
+                    4: ["safety_checker"],
+                    5: ["scheduler", "feature_extractor"]
+                }
+
+                for gpu_id, components in device_map.items():
+                    for component in components:
+                        if hasattr(self.pipe, component):
+                            module = getattr(self.pipe, component)
+                            if module is not None:
+                                module.to(f"cuda:{gpu_id}")
+                                print(f"Moved {component} to GPU {gpu_id}")
+            else:
+                self.pipe = self.pipe.to(self.device)
+
+            # Enable memory optimizations
+            print("Enabling memory optimizations...")
+            self.pipe.enable_attention_slicing(slice_size=1)
             self.pipe.enable_vae_slicing()
-            
-            if num_gpus > 1 and not self.distributed:
-                # Enable model parallelism
-                self.pipe.enable_model_cpu_offload()
             
             # Clear cache
             torch.cuda.empty_cache()
