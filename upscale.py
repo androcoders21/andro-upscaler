@@ -220,7 +220,8 @@ class ImageUpscaler:
                     2: ["unet"],
                     3: ["controlnet"],
                     4: ["safety_checker"],
-                    5: ["scheduler", "feature_extractor"]
+                    # 5: ["scheduler", "feature_extractor"]  # Remove scheduler from device mapping
+                    5: ["feature_extractor"]  # Keep feature_extractor in device mapping
                 }
 
                 for gpu_id, components in device_map.items():
