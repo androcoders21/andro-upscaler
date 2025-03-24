@@ -1,362 +1,747 @@
 import os
 import torch
-import numpy as np
-from diffusers.models import FluxControlNetModel
+from diffusers import FluxPipeline, AutoencoderKL, FluxTransformer2DModel, FluxControlNetModel
+from diffusers.image_processor import VaeImageProcessor
+from PIL import Image, ImageEnhance
+### not used here, but useful for debuggingS
+# import numpy as np
+# import threading
+# import time
+# import psutil
+# import pynvml
+import gc
+import argparse
+from pathlib import Path
+from huggingface_hub import login, snapshot_download
+
 # Memory and performance optimizations
 torch.backends.cudnn.benchmark = True
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 os.environ["ACCELERATE_USE_MEMORY_EFFICIENT_ATTENTION"] = "1"
-os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16"
-from diffusers.pipelines import FluxControlNetPipeline
-from PIL import Image, ImageEnhance
-import threading
-import time
-import psutil
-import gc
-import pynvml
-import argparse
-from pathlib import Path
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from huggingface_hub import login, snapshot_download
+os.environ["ACCELERATE_MIXED_PRECISION"] = "bf16"  # Using bfloat16 for better memory efficiency
 
-class MemoryMonitor:
-    def __init__(self):
-        self.keep_running = False
-        self.thread = None
-        if torch.cuda.is_available():
-            pynvml.nvmlInit()
-            self.handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-
-    def get_memory_stats(self):
-        ram = psutil.Process().memory_info()
-        ram_total = psutil.virtual_memory().total / (1024 ** 3)
-        ram_used = ram.rss / (1024 ** 3)
-        cpu_percent = psutil.cpu_percent()
-
-        stats = {
-            'ram_used': ram_used,
-            'ram_total': ram_total,
-            'cpu_percent': cpu_percent
-        }
-        
-        if torch.cuda.is_available():
-            gpu_used = torch.cuda.memory_allocated() / (1024 ** 3)
-            gpu_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            gpu_util = pynvml.nvmlDeviceGetUtilizationRates(self.handle).gpu
-            stats.update({
-                'gpu_used': gpu_used,
-                'gpu_total': gpu_total,
-                'gpu_util': gpu_util
-            })
-        
-        return stats
-
-    def monitor_memory(self):
-        while self.keep_running:
-            stats = self.get_memory_stats()
-            if torch.cuda.is_available():
-                vram_info = f"VRAM: {stats['gpu_used']:.1f}GB/{stats['gpu_total']:.1f}GB"
-                gpu_info = f"GPU Usage: {stats['gpu_util']}%"
-            else:
-                vram_info = "VRAM: N/A"
-                gpu_info = "GPU: N/A"
-                
-            ram_info = f"Physical RAM: {stats['ram_used']:.1f}GB/{stats['ram_total']:.1f}GB"
-            cpu_info = f"CPU: {stats['cpu_percent']}%"
-            
-            print(f"{vram_info}, {gpu_info}, {ram_info}, {cpu_info}")
-            time.sleep(3)
-
-    def start_monitoring(self):
-        self.keep_running = True
-        self.thread = threading.Thread(target=self.monitor_memory)
-        self.thread.daemon = True
-        self.thread.start()
-
-    def stop_monitoring(self):
-        self.keep_running = False
-        if self.thread:
-            self.thread.join()
+def flush():
+    """Thoroughly clean GPU memory"""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
 
 class ImageUpscaler:
+    def __init__(self):
+        self.hf_token = "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"
+        self.max_memory = {
+            0: "11GB",  # Leave 1GB buffer on each GPU
+            1: "11GB",
+            2: "11GB",
+            3: "11GB",
+            4: "11GB",
+            5: "11GB"
+        }
+        self.setup()
+
     def print_gpu_memory(self):
         for i in range(torch.cuda.device_count()):
             total = torch.cuda.get_device_properties(i).total_memory / 1e9
             used = torch.cuda.memory_allocated(i) / 1e9
             print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
 
-    def __init__(self, local_rank=-1):
-        # Initialize distributed setup if needed
-        self.local_rank = local_rank
-        self.distributed = local_rank != -1
-        
-        # Initialize CUDA and clear cache
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        # Initialize HuggingFace token
-        self.hf_token = "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"
-
-        if torch.cuda.is_available():
-            n_gpus = torch.cuda.device_count()
-            print(f"\nFound {n_gpus} GPUs!")
-            # Initialize all GPUs
-            for i in range(n_gpus):
-                with torch.cuda.device(i):
-                    torch.cuda.empty_cache()
-            self.print_gpu_memory()
-        
-        self.memory_monitor = MemoryMonitor()
-        self.setup()
-
-    def apply_cc_effects(self, img: Image.Image) -> Image.Image:
-        print("Applying CC effects")
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.60)
-        
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.25)
-        
-        enhancer = ImageEnhance.Color(img)
-        img = enhancer.enhance(1.06)
-        
-        return img
-
-    def print_system_info(self):
-        print("\nSystem Information:")
-        try:
-            import platform
-            if platform.system() == "Linux":
-                with open("/proc/cpuinfo") as f:
-                    for line in f:
-                        if "model name" in line:
-                            cpu_name = line.split(":")[1].strip()
-                            print(f"CPU: {cpu_name}")
-                            break
-            elif platform.system() == "Windows":
-                import winreg
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-                cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0]
-                print(f"CPU: {cpu_name}")
-                winreg.CloseKey(key)
-        except:
-            print("CPU: Information not available")
-
-        if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_total_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            print(f"GPU: {gpu_name} ({gpu_total_mem:.1f}GB)")
-        else:
-            print("GPU: Not available")
-
     def setup(self):
-        print("\nLoading the model into memory")
+        print("\nLoading models in stages...")
+        flush()
+
+        # Stage 1: Load and generate text embeddings
+        print("Stage 1: Loading text encoders and generating embeddings...")
+        pipeline = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            transformer=None,
+            vae=None,
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
         
-        num_gpus = torch.cuda.device_count()
-        if num_gpus > 1:
-            print(f"\nInitializing with {num_gpus} GPUs")
-            if self.distributed:
-                torch.cuda.set_device(self.local_rank)
-                dist.init_process_group(backend="nccl")
-                self.device = f"cuda:{self.local_rank}"
-            else:
-                # Use first GPU as primary
-                torch.cuda.set_device(0)
-                self.device = "cuda:0"
-        else:
-            print("\nSingle GPU mode")
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Set gradient optimization
-        torch.set_grad_enabled(False)
-        
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        try:
-            print("Loading model components with optimizations...")
-            
-            # Load models with optimizations
-            print("Loading ControlNet...")
-            self.controlnet = FluxControlNetModel.from_pretrained(
-                "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-                device_map="auto"  # Let the model decide optimal placement
+        # Generate base embeddings for upscaling
+        with torch.no_grad():
+            self.prompt_embeds, self.pooled_prompt_embeds, _ = pipeline.encode_prompt(
+                prompt="enhance image quality, sharpen details",
+                prompt_2=None,
+                max_sequence_length=512
             )
 
-            # Authenticate with HuggingFace
-            login(token=self.hf_token)
+        # Clean up text encoders
+        del pipeline.text_encoder
+        del pipeline.text_encoder_2
+        del pipeline.tokenizer
+        del pipeline.tokenizer_2
+        del pipeline
+        flush()
 
-            # Download and get model path
-            print("Downloading model files...")
-            model_path = snapshot_download(
-                repo_id="black-forest-labs/FLUX.1-dev",
-                repo_type="model",
-                ignore_patterns=["*.md", "*.gitattributes"],
-                local_dir="FLUX.1-dev",
-                token=self.hf_token,
-            )
+        # Stage 2: Load transformer for processing
+        print("Stage 2: Loading transformer model...")
+        self.transformer = FluxTransformer2DModel.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="transformer",
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
 
-            print("Loading Pipeline...")
-            self.pipe = FluxControlNetPipeline.from_pretrained(
-                model_path,
-                controlnet=self.controlnet,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-                device_map="auto"  # Let the model decide optimal placement
-            )
+        # Stage 3: Load ControlNet
+        print("Stage 3: Loading ControlNet...")
+        self.controlnet = FluxControlNetModel.from_pretrained(
+            "jasperai/Flux.1-dev-Controlnet-Upscaler",
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            device_map="balanced",
+            max_memory=self.max_memory
+        )
 
-            # Enable memory optimizations
-            print("Enabling memory optimizations...")
-            self.pipe.enable_attention_slicing(slice_size=1)
-            
-            # Ensure tokenizer stays with text_encoder
-            if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe.text_encoder, "device"):
-                text_device = self.pipe.text_encoder.device
-                print(f"Text encoder is on {text_device}")
-                
-            # Clear cache
-            gc.collect()
-                
-            # Clear memory again after loading
-            torch.cuda.empty_cache()
-            gc.collect()
-        except Exception as e:
-            print(f"Error during model loading: {str(e)}")
-            raise
-            
-        # Print GPU memory usage after loading
-        if torch.cuda.is_available():
-            print("\nGPU memory usage after model loading:")
-            self.print_gpu_memory()
+        # Stage 4: Initialize pipeline with loaded components
+        print("Stage 4: Initializing pipeline...")
+        self.pipe = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            text_encoder=None,
+            text_encoder_2=None,
+            tokenizer=None,
+            tokenizer_2=None,
+            vae=None,
+            transformer=self.transformer,
+            controlnet=self.controlnet,
+            torch_dtype=torch.bfloat16
+        )
 
-    def process_input(self, input_image: Image.Image) -> Image.Image:
-        print("Processing input image dimensions")
+        # Stage 5: Load VAE on first GPU
+        print("Stage 5: Loading VAE...")
+        self.vae = AutoencoderKL.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="vae",
+            torch_dtype=torch.bfloat16
+        ).to("cuda:0")  # VAE on first GPU
+        
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels))
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+        print("\nModel loading complete. Current GPU memory usage:")
+        self.print_gpu_memory()
+
+    def process_input(self, input_image: Image.Image, max_size: int = 512) -> Image.Image:
         w, h = input_image.size
         aspect_ratio = h / w
         
-        if w > 576:
-            w = 576
-            h = int(w * aspect_ratio)
-            input_image = input_image.resize((w, h), Image.LANCZOS)
-        elif w < 240:
-            w = 480
-            h = int(w * aspect_ratio)
-            input_image = input_image.resize((w, h), Image.LANCZOS)
+        if w > h:
+            new_w = min(w, max_size)
+            new_h = int(new_w * aspect_ratio)
+        else:
+            new_h = min(h, max_size)
+            new_w = int(new_h / aspect_ratio)
             
-        w = w - w % 8
-        h = h - h % 8
-        return input_image.resize((w, h), Image.LANCZOS)
+        # Ensure dimensions are divisible by 8
+        new_w = new_w - new_w % 8
+        new_h = new_h - new_h % 8
+        
+        return input_image.resize((new_w, new_h), Image.LANCZOS)
 
     def upscale(self, input_path: str, output_path: str = "output.jpg", prompt: str = "",
-                guidance_scale: float = 5.0, apply_cc_preset: bool = False,
-                num_inference_steps: int = 28, upscale_factor: int = 2,  # Reducing default upscale factor
+                guidance_scale: float = 3.5, apply_cc_preset: bool = False,
+                num_inference_steps: int = 20, upscale_factor: float = 2.0,
                 controlnet_conditioning_scale: float = 0.6, seed: int = None) -> str:
         
         if seed is None:
             seed = int(torch.randint(0, 1000000, (1,))[0].item())
         
-        self.print_system_info()
-        print(f"Seed: {seed}")
+        print(f"Processing with seed: {seed}")
         
+        # Load and prepare input image
         input_image = Image.open(input_path).convert("RGB")
         original_size = input_image.size
         input_image = self.process_input(input_image)
-
-        # Reduce processed input size for memory efficiency
-        max_size = 512  # Limit maximum dimension
+        
+        # Calculate target dimensions
         w, h = input_image.size
-        if max(w, h) > max_size:
-            aspect_ratio = h / w
-            if w > h:
-                w = max_size
-                h = int(w * aspect_ratio)
-            else:
-                h = max_size
-                w = int(h / aspect_ratio)
-            input_image = input_image.resize((w, h), Image.LANCZOS)
-
-        w, h = input_image.size
-        control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
-        control_width, control_height = control_image.size
-
-        # Get device of text_encoder for generator
-        if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe.text_encoder, "device"):
-            text_device = self.pipe.text_encoder.device
-            generator = torch.Generator(device=text_device).manual_seed(seed)
-        else:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        # Free up memory before inference
-        torch.cuda.empty_cache()
-        gc.collect()
+        target_w = int(w * upscale_factor)
+        target_h = int(h * upscale_factor)
+        target_w = target_w - target_w % 8
+        target_h = target_h - target_h % 8
         
-        # Enable more aggressive memory optimizations
-        print("Enabling aggressive memory optimizations...")
-        self.pipe.enable_attention_slicing(slice_size=1)
+        print(f"Processing image from {w}x{h} to {target_w}x{target_h}")
         
-        # Disable safety checker to save memory
-        self.pipe.safety_checker = None
+        # Prepare control image
+        control_image = input_image.resize((target_w, target_h))
         
-        # Use chunked generation for larger images
-        print("Upscaling Started, Starting memory monitoring...")
-        self.memory_monitor.start_monitoring()
         try:
-            # Run with automatic offloading
-            output_image = self.pipe(
-                prompt=prompt,
-                control_image=control_image,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
+            # Run denoising
+            print("Running denoising...")
+            latents = self.pipe(
+                prompt_embeds=self.prompt_embeds,
+                pooled_prompt_embeds=self.pooled_prompt_embeds,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
-                height=control_height,
-                width=control_width,
-                generator=generator,
-            ).images[0]
-        finally:
-            print("Stopping memory monitoring...")
-            self.memory_monitor.stop_monitoring()
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        if apply_cc_preset:
-            output_image = self.apply_cc_effects(output_image)
-
-        print("Saving output image")
-        output_path = Path(output_path)
-        output_image = output_image.resize(original_size, Image.LANCZOS)
-        output_image.save(output_path)
-             
-        # Print final GPU memory usage
-        if torch.cuda.is_available():
-            print("\nFinal GPU memory usage:")
-            self.print_gpu_memory()
+                height=target_h,
+                width=target_w,
+                control_image=control_image,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                output_type="latent"
+            ).images
             
-        return str(output_path)
+            # Clean up GPU memory
+            flush()
+            
+            # Decode latents
+            print("Decoding latents...")
+            with torch.no_grad():
+                latents = self.pipe._unpack_latents(latents, target_h, target_w, self.vae_scale_factor)
+                latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+                image = self.vae.decode(latents, return_dict=False)[0]
+                output_image = self.image_processor.postprocess(image, output_type="pil")[0]
+            
+            # Apply color correction if requested
+            if apply_cc_preset:
+                output_image = ImageEnhance.Brightness(output_image).enhance(0.60)
+                output_image = ImageEnhance.Contrast(output_image).enhance(1.25)
+                output_image = ImageEnhance.Color(output_image).enhance(1.06)
+            
+            # Save result
+            print("Saving output image...")
+            output_path = Path(output_path)
+            output_image = output_image.resize(
+                (int(original_size[0] * upscale_factor), int(original_size[1] * upscale_factor)),
+                Image.LANCZOS
+            )
+            output_image.save(output_path)
+            
+            return str(output_path)
+            
+        except Exception as e:
+            print(f"Error during processing: {str(e)}")
+            raise
+        finally:
+            # Clean up
+            flush()
+            self.print_gpu_memory()
 
 def main():
     parser = argparse.ArgumentParser(description="Image Upscaler using FLUX.1")
     parser.add_argument("input_image", help="Path to the input image")
     parser.add_argument("--output", default="output.jpg", help="Path for the output image")
-    parser.add_argument("--prompt", default="", help="Text prompt to guide the upscaling")
-    parser.add_argument("--guidance-scale", type=float, default=5.0, help="Guidance scale (1.0-20.0)")
+    parser.add_argument("--prompt", default="", help="Optional text prompt to guide upscaling")
+    parser.add_argument("--guidance-scale", type=float, default=3.5, help="Guidance scale (1.0-20.0)")
     parser.add_argument("--apply-cc", action="store_true", help="Apply color correction")
-    parser.add_argument("--steps", type=int, default=28, help="Number of inference steps (8-50)")
-    parser.add_argument("--upscale-factor", type=int, default=4, help="Upscale factor (1-4)")
-    parser.add_argument("--controlnet-scale", type=float, default=0.6, help="ControlNet conditioning scale (0.1-1.5)")
+    parser.add_argument("--steps", type=int, default=20, help="Number of inference steps")
+    parser.add_argument("--upscale-factor", type=float, default=2.0, help="Upscale factor")
+    parser.add_argument("--controlnet-scale", type=float, default=0.6, help="ControlNet conditioning scale")
     parser.add_argument("--seed", type=int, help="Random seed (optional)")
-    parser.add_argument("--local-rank", type=int, default=-1, help="Local rank for distributed training")
 
     args = parser.parse_args()
+    
+    upscaler = ImageUpscaler()
+    output_path = upscaler.upscale(
+        args.input_image,
+        args.output,
+        args.prompt,
+        args.guidance_scale,
+        args.apply_cc,
+        args.steps,
+        args.upscale_factor,
+        args.controlnet_scale,
+        args.seed
+    )
+    print(f"Upscaled image saved to: {output_path}")
 
-    upscaler = ImageUpscaler(local_rank=args.local_rank)
+if __name__ == "__main__":
+    main()
+import os
+import torch
+from diffusers import FluxPipeline, AutoencoderKL, FluxTransformer2DModel, FluxControlNetModel
+from diffusers.image_processor import VaeImageProcessor
+from PIL import Image, ImageEnhance
+### not used here, but useful for debuggingS
+# import numpy as np
+# import threading
+# import time
+# import psutil
+# import pynvml
+import gc
+import argparse
+from pathlib import Path
+from huggingface_hub import login, snapshot_download
+
+# Memory and performance optimizations
+torch.backends.cudnn.benchmark = True
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+os.environ["ACCELERATE_USE_MEMORY_EFFICIENT_ATTENTION"] = "1"
+os.environ["ACCELERATE_MIXED_PRECISION"] = "bf16"  # Using bfloat16 for better memory efficiency
+
+def flush():
+    """Thoroughly clean GPU memory"""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+
+class ImageUpscaler:
+    def __init__(self):
+        self.hf_token = "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"
+        self.max_memory = {
+            0: "11GB",  # Leave 1GB buffer on each GPU
+            1: "11GB",
+            2: "11GB",
+            3: "11GB",
+            4: "11GB",
+            5: "11GB"
+        }
+        self.setup()
+
+    def print_gpu_memory(self):
+        for i in range(torch.cuda.device_count()):
+            total = torch.cuda.get_device_properties(i).total_memory / 1e9
+            used = torch.cuda.memory_allocated(i) / 1e9
+            print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
+
+    def setup(self):
+        print("\nLoading models in stages...")
+        flush()
+
+        # Stage 1: Load and generate text embeddings
+        print("Stage 1: Loading text encoders and generating embeddings...")
+        pipeline = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            transformer=None,
+            vae=None,
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
+        
+        # Generate base embeddings for upscaling
+        with torch.no_grad():
+            self.prompt_embeds, self.pooled_prompt_embeds, _ = pipeline.encode_prompt(
+                prompt="enhance image quality, sharpen details",
+                prompt_2=None,
+                max_sequence_length=512
+            )
+
+        # Clean up text encoders
+        del pipeline.text_encoder
+        del pipeline.text_encoder_2
+        del pipeline.tokenizer
+        del pipeline.tokenizer_2
+        del pipeline
+        flush()
+
+        # Stage 2: Load transformer for processing
+        print("Stage 2: Loading transformer model...")
+        self.transformer = FluxTransformer2DModel.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="transformer",
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
+
+        # Stage 3: Load ControlNet
+        print("Stage 3: Loading ControlNet...")
+        self.controlnet = FluxControlNetModel.from_pretrained(
+            "jasperai/Flux.1-dev-Controlnet-Upscaler",
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            device_map="balanced",
+            max_memory=self.max_memory
+        )
+
+        # Stage 4: Initialize pipeline with loaded components
+        print("Stage 4: Initializing pipeline...")
+        self.pipe = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            text_encoder=None,
+            text_encoder_2=None,
+            tokenizer=None,
+            tokenizer_2=None,
+            vae=None,
+            transformer=self.transformer,
+            controlnet=self.controlnet,
+            torch_dtype=torch.bfloat16
+        )
+
+        # Stage 5: Load VAE on first GPU
+        print("Stage 5: Loading VAE...")
+        self.vae = AutoencoderKL.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="vae",
+            torch_dtype=torch.bfloat16
+        ).to("cuda:0")  # VAE on first GPU
+        
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels))
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+        print("\nModel loading complete. Current GPU memory usage:")
+        self.print_gpu_memory()
+
+    def process_input(self, input_image: Image.Image, max_size: int = 512) -> Image.Image:
+        w, h = input_image.size
+        aspect_ratio = h / w
+        
+        if w > h:
+            new_w = min(w, max_size)
+            new_h = int(new_w * aspect_ratio)
+        else:
+            new_h = min(h, max_size)
+            new_w = int(new_h / aspect_ratio)
+            
+        # Ensure dimensions are divisible by 8
+        new_w = new_w - new_w % 8
+        new_h = new_h - new_h % 8
+        
+        return input_image.resize((new_w, new_h), Image.LANCZOS)
+
+    def upscale(self, input_path: str, output_path: str = "output.jpg", prompt: str = "",
+                guidance_scale: float = 3.5, apply_cc_preset: bool = False,
+                num_inference_steps: int = 20, upscale_factor: float = 2.0,
+                controlnet_conditioning_scale: float = 0.6, seed: int = None) -> str:
+        
+        if seed is None:
+            seed = int(torch.randint(0, 1000000, (1,))[0].item())
+        
+        print(f"Processing with seed: {seed}")
+        
+        # Load and prepare input image
+        input_image = Image.open(input_path).convert("RGB")
+        original_size = input_image.size
+        input_image = self.process_input(input_image)
+        
+        # Calculate target dimensions
+        w, h = input_image.size
+        target_w = int(w * upscale_factor)
+        target_h = int(h * upscale_factor)
+        target_w = target_w - target_w % 8
+        target_h = target_h - target_h % 8
+        
+        print(f"Processing image from {w}x{h} to {target_w}x{target_h}")
+        
+        # Prepare control image
+        control_image = input_image.resize((target_w, target_h))
+        
+        try:
+            # Run denoising
+            print("Running denoising...")
+            latents = self.pipe(
+                prompt_embeds=self.prompt_embeds,
+                pooled_prompt_embeds=self.pooled_prompt_embeds,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                height=target_h,
+                width=target_w,
+                control_image=control_image,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                output_type="latent"
+            ).images
+            
+            # Clean up GPU memory
+            flush()
+            
+            # Decode latents
+            print("Decoding latents...")
+            with torch.no_grad():
+                latents = self.pipe._unpack_latents(latents, target_h, target_w, self.vae_scale_factor)
+                latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+                image = self.vae.decode(latents, return_dict=False)[0]
+                output_image = self.image_processor.postprocess(image, output_type="pil")[0]
+            
+            # Apply color correction if requested
+            if apply_cc_preset:
+                output_image = ImageEnhance.Brightness(output_image).enhance(0.60)
+                output_image = ImageEnhance.Contrast(output_image).enhance(1.25)
+                output_image = ImageEnhance.Color(output_image).enhance(1.06)
+            
+            # Save result
+            print("Saving output image...")
+            output_path = Path(output_path)
+            output_image = output_image.resize(
+                (int(original_size[0] * upscale_factor), int(original_size[1] * upscale_factor)),
+                Image.LANCZOS
+            )
+            output_image.save(output_path)
+            
+            return str(output_path)
+            
+        except Exception as e:
+            print(f"Error during processing: {str(e)}")
+            raise
+        finally:
+            # Clean up
+            flush()
+            self.print_gpu_memory()
+
+def main():
+    parser = argparse.ArgumentParser(description="Image Upscaler using FLUX.1")
+    parser.add_argument("input_image", help="Path to the input image")
+    parser.add_argument("--output", default="output.jpg", help="Path for the output image")
+    parser.add_argument("--prompt", default="", help="Optional text prompt to guide upscaling")
+    parser.add_argument("--guidance-scale", type=float, default=3.5, help="Guidance scale (1.0-20.0)")
+    parser.add_argument("--apply-cc", action="store_true", help="Apply color correction")
+    parser.add_argument("--steps", type=int, default=20, help="Number of inference steps")
+    parser.add_argument("--upscale-factor", type=float, default=2.0, help="Upscale factor")
+    parser.add_argument("--controlnet-scale", type=float, default=0.6, help="ControlNet conditioning scale")
+    parser.add_argument("--seed", type=int, help="Random seed (optional)")
+
+    args = parser.parse_args()
+    
+    upscaler = ImageUpscaler()
+    output_path = upscaler.upscale(
+        args.input_image,
+        args.output,
+        args.prompt,
+        args.guidance_scale,
+        args.apply_cc,
+        args.steps,
+        args.upscale_factor,
+        args.controlnet_scale,
+        args.seed
+    )
+    print(f"Upscaled image saved to: {output_path}")
+
+if __name__ == "__main__":
+    main()
+import os
+import torch
+from diffusers import FluxPipeline, AutoencoderKL, FluxTransformer2DModel, FluxControlNetModel
+from diffusers.image_processor import VaeImageProcessor
+from PIL import Image, ImageEnhance
+### not used here, but useful for debuggingS
+# import numpy as np
+# import threading
+# import time
+# import psutil
+# import pynvml
+import gc
+import argparse
+from pathlib import Path
+from huggingface_hub import login, snapshot_download
+
+# Memory and performance optimizations
+torch.backends.cudnn.benchmark = True
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+os.environ["ACCELERATE_USE_MEMORY_EFFICIENT_ATTENTION"] = "1"
+os.environ["ACCELERATE_MIXED_PRECISION"] = "bf16"  # Using bfloat16 for better memory efficiency
+
+def flush():
+    """Thoroughly clean GPU memory"""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+
+class ImageUpscaler:
+    def __init__(self):
+        self.hf_token = "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"
+        self.max_memory = {
+            0: "11GB",  # Leave 1GB buffer on each GPU
+            1: "11GB",
+            2: "11GB",
+            3: "11GB",
+            4: "11GB",
+            5: "11GB"
+        }
+        self.setup()
+
+    def print_gpu_memory(self):
+        for i in range(torch.cuda.device_count()):
+            total = torch.cuda.get_device_properties(i).total_memory / 1e9
+            used = torch.cuda.memory_allocated(i) / 1e9
+            print(f"GPU {i}: Using {used:.1f}GB / {total:.1f}GB")
+
+    def setup(self):
+        print("\nLoading models in stages...")
+        flush()
+
+        # Stage 1: Load and generate text embeddings
+        print("Stage 1: Loading text encoders and generating embeddings...")
+        pipeline = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            transformer=None,
+            vae=None,
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
+        
+        # Generate base embeddings for upscaling
+        with torch.no_grad():
+            self.prompt_embeds, self.pooled_prompt_embeds, _ = pipeline.encode_prompt(
+                prompt="enhance image quality, sharpen details",
+                prompt_2=None,
+                max_sequence_length=512
+            )
+
+        # Clean up text encoders
+        del pipeline.text_encoder
+        del pipeline.text_encoder_2
+        del pipeline.tokenizer
+        del pipeline.tokenizer_2
+        del pipeline
+        flush()
+
+        # Stage 2: Load transformer for processing
+        print("Stage 2: Loading transformer model...")
+        self.transformer = FluxTransformer2DModel.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="transformer",
+            device_map="balanced",
+            max_memory=self.max_memory,
+            torch_dtype=torch.bfloat16
+        )
+
+        # Stage 3: Load ControlNet
+        print("Stage 3: Loading ControlNet...")
+        self.controlnet = FluxControlNetModel.from_pretrained(
+            "jasperai/Flux.1-dev-Controlnet-Upscaler",
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            device_map="balanced",
+            max_memory=self.max_memory
+        )
+
+        # Stage 4: Initialize pipeline with loaded components
+        print("Stage 4: Initializing pipeline...")
+        self.pipe = FluxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            text_encoder=None,
+            text_encoder_2=None,
+            tokenizer=None,
+            tokenizer_2=None,
+            vae=None,
+            transformer=self.transformer,
+            controlnet=self.controlnet,
+            torch_dtype=torch.bfloat16
+        )
+
+        # Stage 5: Load VAE on first GPU
+        print("Stage 5: Loading VAE...")
+        self.vae = AutoencoderKL.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            subfolder="vae",
+            torch_dtype=torch.bfloat16
+        ).to("cuda:0")  # VAE on first GPU
+        
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels))
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+        print("\nModel loading complete. Current GPU memory usage:")
+        self.print_gpu_memory()
+
+    def process_input(self, input_image: Image.Image, max_size: int = 512) -> Image.Image:
+        w, h = input_image.size
+        aspect_ratio = h / w
+        
+        if w > h:
+            new_w = min(w, max_size)
+            new_h = int(new_w * aspect_ratio)
+        else:
+            new_h = min(h, max_size)
+            new_w = int(new_h / aspect_ratio)
+            
+        # Ensure dimensions are divisible by 8
+        new_w = new_w - new_w % 8
+        new_h = new_h - new_h % 8
+        
+        return input_image.resize((new_w, new_h), Image.LANCZOS)
+
+    def upscale(self, input_path: str, output_path: str = "output.jpg", prompt: str = "",
+                guidance_scale: float = 3.5, apply_cc_preset: bool = False,
+                num_inference_steps: int = 20, upscale_factor: float = 2.0,
+                controlnet_conditioning_scale: float = 0.6, seed: int = None) -> str:
+        
+        if seed is None:
+            seed = int(torch.randint(0, 1000000, (1,))[0].item())
+        
+        print(f"Processing with seed: {seed}")
+        
+        # Load and prepare input image
+        input_image = Image.open(input_path).convert("RGB")
+        original_size = input_image.size
+        input_image = self.process_input(input_image)
+        
+        # Calculate target dimensions
+        w, h = input_image.size
+        target_w = int(w * upscale_factor)
+        target_h = int(h * upscale_factor)
+        target_w = target_w - target_w % 8
+        target_h = target_h - target_h % 8
+        
+        print(f"Processing image from {w}x{h} to {target_w}x{target_h}")
+        
+        # Prepare control image
+        control_image = input_image.resize((target_w, target_h))
+        
+        try:
+            # Run denoising
+            print("Running denoising...")
+            latents = self.pipe(
+                prompt_embeds=self.prompt_embeds,
+                pooled_prompt_embeds=self.pooled_prompt_embeds,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                height=target_h,
+                width=target_w,
+                control_image=control_image,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                output_type="latent"
+            ).images
+            
+            # Clean up GPU memory
+            flush()
+            
+            # Decode latents
+            print("Decoding latents...")
+            with torch.no_grad():
+                latents = self.pipe._unpack_latents(latents, target_h, target_w, self.vae_scale_factor)
+                latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+                image = self.vae.decode(latents, return_dict=False)[0]
+                output_image = self.image_processor.postprocess(image, output_type="pil")[0]
+            
+            # Apply color correction if requested
+            if apply_cc_preset:
+                output_image = ImageEnhance.Brightness(output_image).enhance(0.60)
+                output_image = ImageEnhance.Contrast(output_image).enhance(1.25)
+                output_image = ImageEnhance.Color(output_image).enhance(1.06)
+            
+            # Save result
+            print("Saving output image...")
+            output_path = Path(output_path)
+            output_image = output_image.resize(
+                (int(original_size[0] * upscale_factor), int(original_size[1] * upscale_factor)),
+                Image.LANCZOS
+            )
+            output_image.save(output_path)
+            
+            return str(output_path)
+            
+        except Exception as e:
+            print(f"Error during processing: {str(e)}")
+            raise
+        finally:
+            # Clean up
+            flush()
+            self.print_gpu_memory()
+
+def main():
+    parser = argparse.ArgumentParser(description="Image Upscaler using FLUX.1")
+    parser.add_argument("input_image", help="Path to the input image")
+    parser.add_argument("--output", default="output.jpg", help="Path for the output image")
+    parser.add_argument("--prompt", default="", help="Optional text prompt to guide upscaling")
+    parser.add_argument("--guidance-scale", type=float, default=3.5, help="Guidance scale (1.0-20.0)")
+    parser.add_argument("--apply-cc", action="store_true", help="Apply color correction")
+    parser.add_argument("--steps", type=int, default=20, help="Number of inference steps")
+    parser.add_argument("--upscale-factor", type=float, default=2.0, help="Upscale factor")
+    parser.add_argument("--controlnet-scale", type=float, default=0.6, help="ControlNet conditioning scale")
+    parser.add_argument("--seed", type=int, help="Random seed (optional)")
+
+    args = parser.parse_args()
+    
+    upscaler = ImageUpscaler()
     output_path = upscaler.upscale(
         args.input_image,
         args.output,
