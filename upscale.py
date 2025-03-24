@@ -226,8 +226,12 @@ class ImageUpscaler:
                         if hasattr(self.pipe, component):
                             module = getattr(self.pipe, component)
                             if module is not None:
-                                module.to(f"cuda:{gpu_id}")
-                                print(f"Moved {component} to GPU {gpu_id}")
+                                # Check if the module has a 'to' method before calling it
+                                if hasattr(module, "to"):
+                                    module.to(f"cuda:{gpu_id}")
+                                    print(f"Moved {component} to GPU {gpu_id}")
+                                else:
+                                    print(f"Skipping {component} (not a PyTorch module)")
             else:
                 self.pipe = self.pipe.to(self.device)
 
