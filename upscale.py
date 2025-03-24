@@ -295,57 +295,24 @@ class ImageUpscaler:
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        # Force all pipeline components to the same device to avoid mixed device errors
-        print("Ensuring pipeline components are on consistent devices...")
-        if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe.text_encoder, "device"):
-            text_device = self.pipe.text_encoder.device
-            # Don't try to move tokenizer - it doesn't have a to() method
-            # Just prepare for processing on the correct device
+        # Move the entire pipeline to a single device to avoid cross-device operations
+        print("Moving pipeline to primary device to avoid device mismatch...")
+        self.pipe.to(self.device)
 
         print("Upscaling Started, Starting memory monitoring...")
         self.memory_monitor.start_monitoring()
         try:
-            # Process prompt on the text encoder's device if prompt is provided
-            if prompt:
-                # Get text encoder device
-                if hasattr(self.pipe, "text_encoder"):
-                    text_device = self.pipe.text_encoder.device
-                else:
-                    text_device = self.device
-                
-                # Pre-process text input to ensure it's on the right device
-                text_inputs = self.pipe.tokenizer(
-                    prompt,
-                    padding="max_length",
-                    max_length=self.pipe.tokenizer.model_max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                text_inputs = {k: v.to(text_device) for k, v in text_inputs.items()}
-                
-                # Let the pipeline handle the rest
-                output_image = self.pipe(
-                    prompt_embeds=self.pipe.text_encoder(**text_inputs).last_hidden_state,
-                    control_image=control_image,
-                    controlnet_conditioning_scale=controlnet_conditioning_scale,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    height=control_height,
-                    width=control_width,
-                    generator=generator,
-                ).images[0]
-            else:
-                # No prompt - much simpler case
-                output_image = self.pipe(
-                    prompt="",
-                    control_image=control_image,
-                    controlnet_conditioning_scale=controlnet_conditioning_scale,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    height=control_height,
-                    width=control_width,
-                    generator=generator,
-                ).images[0]
+            # Use simplified approach with string prompt to avoid manual tensor operations
+            output_image = self.pipe(
+                prompt=prompt,
+                control_image=control_image,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                height=control_height,
+                width=control_width,
+                generator=generator,
+            ).images[0]
         finally:
             print("Stopping memory monitoring...")
             self.memory_monitor.stop_monitoring()
