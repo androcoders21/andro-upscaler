@@ -237,7 +237,6 @@ class ImageUpscaler:
             # Enable memory optimizations
             print("Enabling memory optimizations...")
             self.pipe.enable_attention_slicing(slice_size=1)
-            self.pipe.enable_vae_slicing()
             
             # Clear cache
             torch.cuda.empty_cache()
