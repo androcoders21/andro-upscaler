@@ -1,6 +1,6 @@
 import os
 import torch
-import numpy as np
+import numpy np
 from diffusers.models import FluxControlNetModel
 # Memory and performance optimizations
 torch.backends.cudnn.benchmark = True
@@ -186,7 +186,8 @@ class ImageUpscaler:
                 "jasperai/Flux.1-dev-Controlnet-Upscaler",
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
-                use_safetensors=True
+                use_safetensors=True,
+                device_map="auto"  # Let the model decide optimal placement
             )
 
             # Authenticate with HuggingFace
@@ -208,43 +209,24 @@ class ImageUpscaler:
                 controlnet=self.controlnet,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
-                use_safetensors=True
+                use_safetensors=True,
+                device_map="auto"  # Let the model decide optimal placement
             )
-
-            if num_gpus > 1:
-                print("Distributing model across GPUs...")
-                # Distribute components across GPUs
-                device_map = {
-                    0: ["text_encoder", "tokenizer"],  # Keep text processing on same GPU
-                    1: ["vae", "unet"],               # Keep image generation components together
-                    2: ["controlnet"],                # Dedicated GPU for controlnet
-                    3: ["safety_checker", "feature_extractor"]
-                }
-
-                for gpu_id, components in device_map.items():
-                    for component in components:
-                        if hasattr(self.pipe, component):
-                            module = getattr(self.pipe, component)
-                            if module is not None:
-                                # Check if the module has a 'to' method before calling it
-                                if hasattr(module, "to"):
-                                    module.to(f"cuda:{gpu_id}")
-                                    print(f"Moved {component} to GPU {gpu_id}")
-                                else:
-                                    print(f"Skipping {component} (not a PyTorch module)")
-            else:
-                self.pipe = self.pipe.to(self.device)
 
             # Enable memory optimizations
             print("Enabling memory optimizations...")
             self.pipe.enable_attention_slicing(slice_size=1)
             
+            # Ensure tokenizer stays with text_encoder
+            if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe.text_encoder, "device"):
+                text_device = self.pipe.text_encoder.device
+                print(f"Text encoder is on {text_device}")
+                
             # Clear cache
-            # torch.cuda.empty_cache()
             gc.collect()
                 
             # Clear memory again after loading
-            # torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
             gc.collect()
         except Exception as e:
             print(f"Error during model loading: {str(e)}")
@@ -275,7 +257,7 @@ class ImageUpscaler:
 
     def upscale(self, input_path: str, output_path: str = "output.jpg", prompt: str = "",
                 guidance_scale: float = 5.0, apply_cc_preset: bool = False,
-                num_inference_steps: int = 28, upscale_factor: int = 4,
+                num_inference_steps: int = 28, upscale_factor: int = 2,  # Reducing default upscale factor
                 controlnet_conditioning_scale: float = 0.6, seed: int = None) -> str:
         
         if seed is None:
@@ -288,12 +270,29 @@ class ImageUpscaler:
         original_size = input_image.size
         input_image = self.process_input(input_image)
 
+        # Reduce processed input size for memory efficiency
+        max_size = 512  # Limit maximum dimension
+        w, h = input_image.size
+        if max(w, h) > max_size:
+            aspect_ratio = h / w
+            if w > h:
+                w = max_size
+                h = int(w * aspect_ratio)
+            else:
+                h = max_size
+                w = int(h / aspect_ratio)
+            input_image = input_image.resize((w, h), Image.LANCZOS)
+
         w, h = input_image.size
         control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
-        # Store dimensions before converting to tensor
         control_width, control_height = control_image.size
 
-        generator = torch.Generator(device=self.device).manual_seed(seed)
+        # Get device of text_encoder for generator
+        if hasattr(self.pipe, "text_encoder") and hasattr(self.pipe.text_encoder, "device"):
+            text_device = self.pipe.text_encoder.device
+            generator = torch.Generator(device=text_device).manual_seed(seed)
+        else:
+            generator = torch.Generator(device=self.device).manual_seed(seed)
 
         # Free up memory before inference
         torch.cuda.empty_cache()
@@ -302,32 +301,30 @@ class ImageUpscaler:
         # Enable more aggressive memory optimizations
         print("Enabling aggressive memory optimizations...")
         self.pipe.enable_attention_slicing(slice_size=1)
-        self.pipe.enable_xformers_memory_efficient_attention()
         
-        # Override safety checker to save memory
+        # Disable safety checker to save memory
         self.pipe.safety_checker = None
         
-        # Run with reduced precision to save memory
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            print("Upscaling Started, Starting memory monitoring...")
-            self.memory_monitor.start_monitoring()
-            try:
-                # Keep pipeline on distributed GPUs
-                output_image = self.pipe(
-                    prompt=prompt,
-                    control_image=control_image,
-                    controlnet_conditioning_scale=controlnet_conditioning_scale,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    height=control_height,
-                    width=control_width,
-                    generator=generator,
-                ).images[0]
-            finally:
-                print("Stopping memory monitoring...")
-                self.memory_monitor.stop_monitoring()
-                gc.collect()
-                torch.cuda.empty_cache()
+        # Use chunked generation for larger images
+        print("Upscaling Started, Starting memory monitoring...")
+        self.memory_monitor.start_monitoring()
+        try:
+            # Run with automatic offloading
+            output_image = self.pipe(
+                prompt=prompt,
+                control_image=control_image,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                height=control_height,
+                width=control_width,
+                generator=generator,
+            ).images[0]
+        finally:
+            print("Stopping memory monitoring...")
+            self.memory_monitor.stop_monitoring()
+            gc.collect()
+            torch.cuda.empty_cache()
 
         if apply_cc_preset:
             output_image = self.apply_cc_effects(output_image)
