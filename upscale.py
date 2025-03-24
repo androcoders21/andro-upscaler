@@ -1,6 +1,6 @@
 import os
 import torch
-import numpy np
+import numpy as np
 from diffusers.models import FluxControlNetModel
 # Memory and performance optimizations
 torch.backends.cudnn.benchmark = True
