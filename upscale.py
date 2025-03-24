@@ -290,6 +290,8 @@ class ImageUpscaler:
 
         w, h = input_image.size
         control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
+        # Store dimensions before converting to tensor
+        control_width, control_height = control_image.size
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
@@ -326,8 +328,8 @@ class ImageUpscaler:
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
-                height=control_image.size[1],
-                width=control_image.size[0],
+                height=control_height,
+                width=control_width,
                 generator=generator,
             ).images[0]
         finally:
