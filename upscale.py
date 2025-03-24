@@ -2,14 +2,11 @@ import os
 import torch
 import numpy as np
 from diffusers.models import FluxControlNetModel
-# Set memory management configuration
+# Memory and performance optimizations
 torch.backends.cudnn.benchmark = True
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
-try:
-    import deepspeed
-except ImportError:
-    os.system('pip install deepspeed')
-    import deepspeed
+os.environ["ACCELERATE_USE_MEMORY_EFFICIENT_ATTENTION"] = "1"
+os.environ["ACCELERATE_MIXED_PRECISION"] = "fp16"
 from diffusers.pipelines import FluxControlNetPipeline
 from PIL import Image, ImageEnhance
 import threading
@@ -155,27 +152,20 @@ class ImageUpscaler:
     def setup(self):
         print("\nLoading the model into memory")
         
-        # DeepSpeed initialization
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
-            print(f"Initializing DeepSpeed with {num_gpus} GPUs")
-            # DeepSpeed configuration
-            ds_config = {
-                "fp16": {"enabled": True},
-                "zero_optimization": {
-                    "stage": 3,
-                    "overlap_comm": True,
-                    "contiguous_gradients": True,
-                    "reduce_bucket_size": 5e7
-                },
-                "train_batch_size": 1
-            }
-            deepspeed.init_distributed()
+            print(f"\nInitializing with {num_gpus} GPUs")
+            if self.distributed:
+                torch.cuda.set_device(self.local_rank)
+                dist.init_process_group(backend="nccl")
+                self.device = f"cuda:{self.local_rank}"
+            else:
+                # Use first GPU as primary
+                torch.cuda.set_device(0)
+                self.device = "cuda:0"
         else:
-            print("Single GPU mode")
-        
-        # Set device
-        self.device = f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu"
+            print("\nSingle GPU mode")
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Set gradient optimization
         torch.set_grad_enabled(False)
@@ -184,39 +174,37 @@ class ImageUpscaler:
         gc.collect()
         
         try:
-            print("Loading model components with pipeline parallelism...")
-            # Load base controlnet model
+            print("Loading model components with optimizations...")
+            
+            # Memory optimization config
+            model_config = {
+                "torch_dtype": torch.float16,
+                "low_cpu_mem_usage": True,
+                "use_safetensors": True,
+                "device_map": "auto" if num_gpus > 1 else self.device
+            }
+            
+            # Load controlnet with optimizations
             self.controlnet = FluxControlNetModel.from_pretrained(
                 "jasperai/Flux.1-dev-Controlnet-Upscaler",
-                torch_dtype=torch.float16,
-                variant="fp16",
-                use_safetensors=True
+                **model_config
             )
-
-            # Load pipeline with model sharding
+            
+            # Load pipeline with optimizations
             self.pipe = FluxControlNetPipeline.from_pretrained(
                 model_path,
                 controlnet=self.controlnet,
-                torch_dtype=torch.float16,
-                variant="fp16",
-                use_safetensors=True
+                **model_config
             )
-
-            # Enable memory optimizations
-            if torch.cuda.device_count() > 1:
-                # Split modules across GPUs
-                devices = list(range(torch.cuda.device_count()))
-                self.pipe.text_encoder = self.pipe.text_encoder.to(f'cuda:{devices[0]}')
-                self.pipe.vae = self.pipe.vae.to(f'cuda:{devices[1]}')
-                self.pipe.unet = self.pipe.unet.to(f'cuda:{devices[2]}')
-                self.controlnet = self.controlnet.to(f'cuda:{devices[3]}')
-                self.pipe.safety_checker = self.pipe.safety_checker.to(f'cuda:{devices[4]}' if len(devices) > 4 else 'cuda:0')
-                self.pipe.feature_extractor = self.pipe.feature_extractor.to(f'cuda:{devices[5]}' if len(devices) > 5 else 'cuda:0')
-            else:
-                self.pipe = self.pipe.to(self.device)
-                
-            # Enable additional memory optimizations
-            self.pipe.enable_attention_slicing(1)
+            
+            # Enable memory efficient optimizations
+            self.pipe.enable_attention_slicing(slice_size="auto")
+            self.pipe.enable_sequential_cpu_offload()
+            self.pipe.enable_vae_slicing()
+            
+            if num_gpus > 1 and not self.distributed:
+                # Enable model parallelism
+                self.pipe.enable_model_cpu_offload()
             
             # Clear cache
             torch.cuda.empty_cache()
