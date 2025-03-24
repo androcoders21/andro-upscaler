@@ -185,6 +185,16 @@ class ImageUpscaler:
                 use_safetensors=True
             )
 
+            # Download and get model path
+            print("Downloading model files...")
+            model_path = snapshot_download(
+                repo_id="black-forest-labs/FLUX.1-dev",
+                repo_type="model",
+                ignore_patterns=["*.md", "*.gitattributes"],
+                local_dir="FLUX.1-dev",
+                token=hf_token,
+            )
+
             print("Loading Pipeline...")
             self.pipe = FluxControlNetPipeline.from_pretrained(
                 model_path,
