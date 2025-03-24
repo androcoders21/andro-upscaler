@@ -18,6 +18,7 @@ import argparse
 from pathlib import Path
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from huggingface_hub import login, snapshot_download
 
 class MemoryMonitor:
     def __init__(self):
@@ -94,6 +95,9 @@ class ImageUpscaler:
         torch.cuda.empty_cache()
         gc.collect()
         
+        # Initialize HuggingFace token
+        self.hf_token = "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"
+
         if torch.cuda.is_available():
             n_gpus = torch.cuda.device_count()
             print(f"\nFound {n_gpus} GPUs!")
@@ -185,6 +189,9 @@ class ImageUpscaler:
                 use_safetensors=True
             )
 
+            # Authenticate with HuggingFace
+            login(token=self.hf_token)
+
             # Download and get model path
             print("Downloading model files...")
             model_path = snapshot_download(
@@ -192,7 +199,7 @@ class ImageUpscaler:
                 repo_type="model",
                 ignore_patterns=["*.md", "*.gitattributes"],
                 local_dir="FLUX.1-dev",
-                token=hf_token,
+                token=self.hf_token,
             )
 
             print("Loading Pipeline...")
