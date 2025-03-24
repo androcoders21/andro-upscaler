@@ -295,29 +295,38 @@ class ImageUpscaler:
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        # Move the entire pipeline to a single device to avoid cross-device operations
-        print("Moving pipeline to primary device to avoid device mismatch...")
-        self.pipe.to(self.device)
-
-        print("Upscaling Started, Starting memory monitoring...")
-        self.memory_monitor.start_monitoring()
-        try:
-            # Use simplified approach with string prompt to avoid manual tensor operations
-            output_image = self.pipe(
-                prompt=prompt,
-                control_image=control_image,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                height=control_height,
-                width=control_width,
-                generator=generator,
-            ).images[0]
-        finally:
-            print("Stopping memory monitoring...")
-            self.memory_monitor.stop_monitoring()
-            gc.collect()
-            if torch.cuda.is_available():
+        # Free up memory before inference
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Enable more aggressive memory optimizations
+        print("Enabling aggressive memory optimizations...")
+        self.pipe.enable_attention_slicing(slice_size=1)
+        self.pipe.enable_xformers_memory_efficient_attention()
+        
+        # Override safety checker to save memory
+        self.pipe.safety_checker = None
+        
+        # Run with reduced precision to save memory
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            print("Upscaling Started, Starting memory monitoring...")
+            self.memory_monitor.start_monitoring()
+            try:
+                # Keep pipeline on distributed GPUs
+                output_image = self.pipe(
+                    prompt=prompt,
+                    control_image=control_image,
+                    controlnet_conditioning_scale=controlnet_conditioning_scale,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    height=control_height,
+                    width=control_width,
+                    generator=generator,
+                ).images[0]
+            finally:
+                print("Stopping memory monitoring...")
+                self.memory_monitor.stop_monitoring()
+                gc.collect()
                 torch.cuda.empty_cache()
 
         if apply_cc_preset:
