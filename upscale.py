@@ -298,33 +298,11 @@ class ImageUpscaler:
         print("Upscaling Started, Starting memory monitoring...")
         self.memory_monitor.start_monitoring()
         try:
-            # Move input tensors to correct devices
-            if hasattr(self.pipe, "text_encoder"):
-                text_device = self.pipe.text_encoder.device
-                # Move prompt related tensors to text encoder's device (GPU 0)
-                if prompt:
-                    prompt = [prompt] if isinstance(prompt, str) else prompt
-                    text_inputs = self.pipe.tokenizer(
-                        prompt,
-                        padding="max_length",
-                        max_length=self.pipe.tokenizer.model_max_length,
-                        truncation=True,
-                        return_tensors="pt",
-                    )
-                    text_inputs = {k: v.to(text_device) for k, v in text_inputs.items()}
-                    prompt_embeds = self.pipe.text_encoder(**text_inputs).last_hidden_state
-                    self.pipe.prompt_embeds = prompt_embeds
-
-            # Convert control image to tensor on controlnet's device (GPU 2)
-            if hasattr(self.pipe, "controlnet"):
-                controlnet_device = self.pipe.controlnet.device
-                if isinstance(control_image, Image.Image):
-                    control_image = self.pipe.image_processor.preprocess(control_image)
-                control_image = control_image.to(controlnet_device, dtype=torch.float16)
-
+            # Let the pipeline handle the device management and tensor conversions
+            # instead of doing it manually
             output_image = self.pipe(
                 prompt=prompt,
-                control_image=control_image,
+                control_image=control_image,  # Pass as PIL image
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
