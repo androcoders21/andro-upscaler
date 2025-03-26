@@ -190,12 +190,11 @@ class FluxUpscaler:
             token=self.hf_token,
         )
 
-        self.torch_dtype = torch.float16
         # CRITICAL FIX: Load ControlNet first on second GPU since it's smaller
         print(f"Loading ControlNet on {self.controlnet_gpu}")
         controlnet = FluxControlNetModel.from_pretrained(
             self.controlnet_id,
-            torch_dtype=torch.float16,
+            torch_dtype=self.torch_dtype,
         ).to(self.controlnet_gpu)
         
         # First approach: load the pipeline on the main GPU, then move components
@@ -209,8 +208,7 @@ class FluxUpscaler:
             model_path,
             controlnet=controlnet,  # Already loaded on controlnet_gpu
             torch_dtype=self.torch_dtype,
-            variant="fp16",
-            # low_cpu_mem_usage=True,
+            variant="fp16" if self.use_float16 else None,
         )
         
         # Now manually move components to their target devices
