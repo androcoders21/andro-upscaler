@@ -90,10 +90,9 @@ class FluxUpscaler:
                 controlnet_id="jasperai/Flux.1-dev-Controlnet-Upscaler", 
                 hf_token=None,
                 offload_vae=True,           # Offload VAE to CPU when not in use
-                use_float16=True,           # Force float16 precision
+                use_float16=True,           # Force float16 precision 
                 use_sequential_cpu_offload=False,  # For extreme memory constraints
-                use_attention_slicing=True,  # Slice attention computation
-                use_model_sharding=True     # Whether to use model sharding for transformer
+                use_attention_slicing=True  # Slice attention computation
                 ):
         
         self.memory_monitor = MemoryMonitor(num_gpus=torch.cuda.device_count())
@@ -106,7 +105,6 @@ class FluxUpscaler:
         self.use_float16 = use_float16
         self.use_sequential_cpu_offload = use_sequential_cpu_offload
         self.use_attention_slicing = use_attention_slicing
-        self.use_model_sharding = use_model_sharding
         
         # Use more memory-efficient precision
         self.torch_dtype = torch.float16 if use_float16 else torch.bfloat16
@@ -175,98 +173,106 @@ class FluxUpscaler:
         # Clear CUDA cache before loading models
         torch.cuda.empty_cache()
         gc.collect()
-        print("Warning: No HF token provided, might have limited access to models")
-    
-    # Download model
-    model_path = snapshot_download(
-        repo_id=self.model_id,
-        repo_type="model",
-        ignore_patterns=["*.md", "*.gitattributes"],
-        local_dir="FLUX.1-dev",
-        token=self.hf_token,
-    )
-    
-    # CRITICAL FIX: Load ControlNet first on second GPU since it's smaller
-    print(f"Loading ControlNet on {self.controlnet_gpu}")
-    controlnet = FluxControlNetModel.from_pretrained(
-        self.controlnet_id,
-        torch_dtype=self.torch_dtype,
-    ).to(self.controlnet_gpu)
-    
-    # First approach: load the pipeline on the main GPU, then move components
-    print(f"Loading pipeline on {self.main_gpu} first, then distributing components...")
-    
-    # Force specified GPU for initial loading
-    torch.cuda.set_device(int(self.main_gpu.split(':')[1]))
-    
-    # Load the pipeline normally first
-    self.pipe = FluxControlNetPipeline.from_pretrained(
-        model_path,
-        controlnet=controlnet,  # Already loaded on controlnet_gpu
-        torch_dtype=self.torch_dtype,
-        variant="fp16" if self.use_float16 else None,
-        low_cpu_mem_usage=True,
-    )
-    
-    # Now manually move components to their target devices
-    print("Moving components to target devices...")
-    
-    # Keep VAE on CPU if offloading is enabled
-    if self.offload_vae:
-        print("Offloading VAE to CPU")
-        self.pipe.vae = self.pipe.vae.to("cpu")
-    
-    # Move non-crucial components to CPU
-    for component_name in ["tokenizer", "tokenizer_2", "scheduler", "feature_extractor"]:
-        if hasattr(self.pipe, component_name) and hasattr(getattr(self.pipe, component_name), "to"):
-            component = getattr(self.pipe, component_name)
-            component.to("cpu")
-    
-    # Keep text encoders on main GPU
-    for component_name in ["text_encoder", "text_encoder_2"]:
-        if hasattr(self.pipe, component_name):
-            component = getattr(self.pipe, component_name)
-            component.to(self.main_gpu)
-    
-    # Split transformer across GPUs
-    if hasattr(self.pipe, "transformer") and hasattr(self.pipe.transformer, "transformer"):
-        print("Splitting transformer across GPUs...")
         
-        # Move base transformer components to main GPU
-        self.pipe.transformer.text_projection = self.pipe.transformer.text_projection.to(self.main_gpu)
-        self.pipe.transformer.text_projection_2 = self.pipe.transformer.text_projection_2.to(self.main_gpu) 
-        self.pipe.transformer.positional_embedding = self.pipe.transformer.positional_embedding.to(self.main_gpu)
-        self.pipe.transformer.final_ln = self.pipe.transformer.final_ln.to(self.main_gpu)
+        # Authenticate with Hugging Face if token provided
+        if self.hf_token:
+            login(token=self.hf_token)
+            print("HF token authenticated")
+        else:
+            print("Warning: No HF token provided, might have limited access to models")
         
-        # Split resblocks across GPUs
-        total_blocks = len(self.pipe.transformer.transformer.resblocks)
-        mid_point = total_blocks // 2
+        # Download model
+        model_path = snapshot_download(
+            repo_id=self.model_id,
+            repo_type="model",
+            ignore_patterns=["*.md", "*.gitattributes"],
+            local_dir="FLUX.1-dev",
+            token=self.hf_token,
+        )
         
-        for i, block in enumerate(self.pipe.transformer.transformer.resblocks):
-            target_device = self.main_gpu if i < mid_point else self.controlnet_gpu
-            print(f"Moving transformer block {i} to {target_device}")
-            block.to(target_device)
-    
-    # Enable memory efficient attention mechanisms
-    if hasattr(self.pipe, 'enable_xformers_memory_efficient_attention'):
-        print("Enabling xformers memory efficient attention")
-        self.pipe.enable_xformers_memory_efficient_attention()
-    elif hasattr(self.pipe, 'enable_attention_slicing') and self.use_attention_slicing:
-        print("Enabling attention slicing")
-        self.pipe.enable_attention_slicing(slice_size="auto")
-    
-    # Enable flash attention if available
-    if hasattr(self.pipe, "enable_flash_attention"):
-        print("Enabling flash attention")
-        self.pipe.enable_flash_attention()
-    
-    # Keep controlnet reference
-    self.controlnet = self.pipe.controlnet
-    
-    # Add handler for cross-device operations
-    self._add_cross_device_handlers()
-    
-    print("Model successfully loaded with transformer split across GPUs")
+        # CRITICAL FIX: Load ControlNet first on second GPU since it's smaller
+        print(f"Loading ControlNet on {self.controlnet_gpu}")
+        controlnet = FluxControlNetModel.from_pretrained(
+            self.controlnet_id,
+            torch_dtype=self.torch_dtype,
+        ).to(self.controlnet_gpu)
+        
+        # First approach: load the pipeline on the main GPU, then move components
+        print(f"Loading pipeline on {self.main_gpu} first, then distributing components...")
+        
+        # Force specified GPU for initial loading
+        torch.cuda.set_device(int(self.main_gpu.split(':')[1]))
+        
+        # Load the pipeline normally first
+        self.pipe = FluxControlNetPipeline.from_pretrained(
+            model_path,
+            controlnet=controlnet,  # Already loaded on controlnet_gpu
+            torch_dtype=self.torch_dtype,
+            variant="fp16" if self.use_float16 else None,
+            low_cpu_mem_usage=True,
+        )
+        
+        # Now manually move components to their target devices
+        print("Moving components to target devices...")
+        
+        # Keep VAE on CPU if offloading is enabled
+        if self.offload_vae:
+            print("Offloading VAE to CPU")
+            self.pipe.vae = self.pipe.vae.to("cpu")
+        
+        # Move non-crucial components to CPU
+        for component_name in ["tokenizer", "tokenizer_2", "scheduler", "feature_extractor"]:
+            if hasattr(self.pipe, component_name) and hasattr(getattr(self.pipe, component_name), "to"):
+                component = getattr(self.pipe, component_name)
+                component.to("cpu")
+        
+        # Keep text encoders on main GPU
+        for component_name in ["text_encoder", "text_encoder_2"]:
+            if hasattr(self.pipe, component_name):
+                component = getattr(self.pipe, component_name)
+                component.to(self.main_gpu)
+        
+        # Split transformer across GPUs
+        if hasattr(self.pipe, "transformer") and hasattr(self.pipe.transformer, "transformer"):
+            print("Splitting transformer across GPUs...")
+            
+            # Move base transformer components to main GPU
+            self.pipe.transformer.text_projection = self.pipe.transformer.text_projection.to(self.main_gpu)
+            if hasattr(self.pipe.transformer, "text_projection_2"):
+                self.pipe.transformer.text_projection_2 = self.pipe.transformer.text_projection_2.to(self.main_gpu) 
+            self.pipe.transformer.positional_embedding = self.pipe.transformer.positional_embedding.to(self.main_gpu)
+            self.pipe.transformer.final_ln = self.pipe.transformer.final_ln.to(self.main_gpu)
+            
+            # Split resblocks across GPUs
+            total_blocks = len(self.pipe.transformer.transformer.resblocks)
+            mid_point = total_blocks // 2
+            
+            for i, block in enumerate(self.pipe.transformer.transformer.resblocks):
+                target_device = self.main_gpu if i < mid_point else self.controlnet_gpu
+                print(f"Moving transformer block {i} to {target_device}")
+                block.to(target_device)
+        
+        # Enable memory efficient attention mechanisms
+        if hasattr(self.pipe, 'enable_xformers_memory_efficient_attention'):
+            print("Enabling xformers memory efficient attention")
+            self.pipe.enable_xformers_memory_efficient_attention()
+        elif hasattr(self.pipe, 'enable_attention_slicing') and self.use_attention_slicing:
+            print("Enabling attention slicing")
+            self.pipe.enable_attention_slicing(slice_size="auto")
+        
+        # Enable flash attention if available
+        if hasattr(self.pipe, "enable_flash_attention"):
+            print("Enabling flash attention")
+            self.pipe.enable_flash_attention()
+        
+        # Keep controlnet reference
+        self.controlnet = self.pipe.controlnet
+        
+        # Add handler for cross-device operations
+        self._add_cross_device_handlers()
+        
+        print("Model successfully loaded with transformer split across GPUs")
+
     def _add_cross_device_handlers(self):
         """Add handlers to manage tensors moving between devices for split models"""
         print("Setting up cross-device handlers for split model components...")
@@ -304,7 +310,7 @@ class FluxUpscaler:
             )
         
         # Handle transformer attention blocks if needed
-        if not self.use_model_sharding and hasattr(self.pipe, 'transformer') and self.pipe.transformer is not None:
+        if hasattr(self.pipe, 'transformer') and hasattr(self.pipe.transformer, 'transformer'):
             # This targets specific modules that might need cross-device handling
             module_patterns = ["attn", "ln_", "resblocks"]
             
@@ -317,7 +323,7 @@ class FluxUpscaler:
                         def patched_forward(self, *args, **kwargs):
                             # Move key inputs to this device
                             moved_tensors = {}
-                            for k, v in kwargs.items():
+                            for k, v in list(kwargs.items()):
                                 if torch.is_tensor(v) and hasattr(v, 'device') and v.device.type == 'cuda' and v.device != module_device:
                                     moved_tensors[k] = v.to(module_device)
                                     kwargs[k] = moved_tensors[k]
@@ -428,11 +434,12 @@ class FluxUpscaler:
             gc.collect()
             
             # Move VAE to CPU temporarily to free up memory if configured
+            vae_device = None
             if self.offload_vae and hasattr(self.pipe, 'vae'):
                 vae_device = self.pipe.vae.device
                 self.pipe.vae = self.pipe.vae.to("cpu")
             
-            # Setup inference parameters with memory optimizations
+            # Setup inference parameters
             inference_kwargs = {
                 "prompt": prompt,
                 "control_image": control_image,
@@ -444,17 +451,12 @@ class FluxUpscaler:
                 "generator": generator,
             }
             
-            # Enable chunked processing for large images
-            if hasattr(self.pipe, "enable_chunked_generation"):
-                print("Enabling chunked generation for memory efficiency")
-                self.pipe.enable_chunked_generation()
-            
             # Aggressive memory optimization
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
                 output = self.pipe(**inference_kwargs)
             
-            # Move VAE back for decoding if it was offloaded
-            if self.offload_vae and hasattr(self.pipe, 'vae'):
+            # Move VAE back if it was offloaded
+            if self.offload_vae and vae_device is not None and hasattr(self.pipe, 'vae'):
                 self.pipe.vae = self.pipe.vae.to(vae_device)
                 
             output_image = output.images[0]
@@ -484,11 +486,10 @@ class FluxUpscaler:
         print("Process complete!")
         return output_path
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='FLUX Upscaler with Multi-GPU Support')
     parser.add_argument('--input', required=True, help='Input image path')
-    parser.add_argument('--output', default='0.jpg', help='Output image path')
+    parser.add_argument('--output', default='output.jpg', help='Output image path')
     parser.add_argument('--prompt', default='', help='Text prompt to guide upscaling')
     parser.add_argument('--guidance_scale', type=float, default=5.0, help='Guidance scale')
     parser.add_argument('--cc', action='store_true', help='Apply color correction')
@@ -503,7 +504,6 @@ if __name__ == "__main__":
     parser.add_argument('--float16', action='store_true', help='Use float16 precision')
     parser.add_argument('--cpu_offload', action='store_true', help='Use sequential CPU offloading')
     parser.add_argument('--attention_slicing', action='store_true', help='Use attention slicing')
-    parser.add_argument('--model_sharding', action='store_true', help='Use model sharding for transformer')
     
     args = parser.parse_args()
     
@@ -514,8 +514,7 @@ if __name__ == "__main__":
         offload_vae=args.offload_vae,
         use_float16=args.float16,
         use_sequential_cpu_offload=args.cpu_offload,
-        use_attention_slicing=args.attention_slicing,
-        use_model_sharding=args.model_sharding
+        use_attention_slicing=args.attention_slicing
     )
     
     upscaler.upscale(
