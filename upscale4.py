@@ -91,7 +91,7 @@ class FluxUpscaler:
                 hf_token=None,
                 offload_vae=True,           # Offload VAE to CPU when not in use
                 use_float16=False,          # Changed to False to use full precision
-                use_sequential_cpu_offload=False,  # For extreme memory constraints
+                use_sequential_cpu_offload=True,  # For extreme memory constraints
                 use_attention_slicing=True  # Slice attention computation
                 ):
         
