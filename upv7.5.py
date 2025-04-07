@@ -295,15 +295,15 @@ def load_model_on_start():
         if success:
             success_msg = "✅ Model loaded successfully! Ready to process images."
             print(success_msg)
-            return success_msg, True  # Return True to enable the button instead of a dictionary
+            return success_msg, "Upscale Image", True  # status, button text, button interactive
         else:
             error_msg = f"❌ Failed to load model: {message}"
             print(error_msg)
-            return error_msg, False  # Return False to keep the button disabled
+            return error_msg, "Loading Model...", False  # status, button text, button interactive
     except Exception as e:
         error_msg = f"❌ Error loading model: {str(e)}"
         print(error_msg)
-        return error_msg, False  # Return False to keep the button disabled
+        return error_msg, "Loading Model...", False  # status, button text, button interactive
 
 def upscale_interface(
     input_image, 
@@ -415,7 +415,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
                     label="Seed (optional)",
                     placeholder="Leave empty for random seed"
                 )
-            upscale_btn = gr.Button("Upscale Image", variant="primary", interactive=False)
+            upscale_btn = gr.Button("Loading Model...", variant="primary", interactive=False)
 
         with gr.Column(scale=1):
             result_image = gr.Image(label="Result", format="jpg")  # Explicitly set format to jpg
@@ -428,7 +428,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
     # Event handlers
     demo.load(
         fn=load_model_on_start,
-        outputs=[status_output, upscale_btn.update],
+        outputs=[status_output, upscale_btn, gr.Button.update(interactive=False)]
     )
     
     upscale_btn.click(
