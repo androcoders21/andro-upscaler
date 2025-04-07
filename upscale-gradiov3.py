@@ -233,11 +233,20 @@ class ImageUpscaler:
             
             # Prepare control image
             w, h = input_image.size
-            # Scale down to 574px width and maintain aspect ratio
-            aspect_ratio = h / w
-            control_width = 574
-            control_height = int(control_width * aspect_ratio)
-            control_image = input_image.resize((control_width, control_height), Image.LANCZOS)
+            
+            # Calculate scaling factor to fit within 574px bounds
+            scale = min(574 / w, 574 / h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            # Round to nearest multiple of 8
+            new_w = round(new_w / 8) * 8
+            new_h = round(new_h / 8) * 8
+            
+            if status_callback:
+                status_callback(f"Resizing image to {new_w}x{new_h} (multiples of 8)")
+                
+            control_image = input_image.resize((new_w, new_h), Image.LANCZOS)
             print(f"Control image size: {control_image.size} image {control_image}")
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
