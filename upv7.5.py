@@ -266,6 +266,7 @@ def save_jpg_image(image: Image.Image, output_dir: str, original_size: tuple) ->
         image = image.resize(original_size, Image.Resampling.LANCZOS)
     
     # Save with high quality JPG settings
+    print(f"Saving image to {filename} after resizing size {original_size}")
     image.save(filename, format='JPEG', quality=95, optimize=True)
     return filename
 
@@ -331,6 +332,8 @@ def upscale_interface(
     if result_image:
         # Store original size at the start
         original_size = get_original_size(input_image)
+        print(f"Original size: {original_size}")
+        print(f"Result image size: {result_image.size}")
         filename = save_jpg_image(result_image, "outputs", original_size)
         return result_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
     else:
