@@ -295,15 +295,15 @@ def load_model_on_start():
         if success:
             success_msg = "✅ Model loaded successfully! Ready to process images."
             print(success_msg)
-            return success_msg, {"interactive": True}
+            return success_msg, True  # Return True to enable the button instead of a dictionary
         else:
             error_msg = f"❌ Failed to load model: {message}"
             print(error_msg)
-            return error_msg, {"interactive": False}
+            return error_msg, False  # Return False to keep the button disabled
     except Exception as e:
         error_msg = f"❌ Error loading model: {str(e)}"
         print(error_msg)
-        return error_msg, {"interactive": False}
+        return error_msg, False  # Return False to keep the button disabled
 
 def upscale_interface(
     input_image, 
