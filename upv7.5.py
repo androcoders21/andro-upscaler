@@ -279,24 +279,31 @@ def get_original_size(image: Image.Image) -> tuple:
 upscaler = ImageUpscaler()
 model_load_status = gr.State("")
 
-def load_model_on_start(status_box, button):
+def load_model_on_start():
     """Load model when the interface starts"""
     try:
-        button.update(interactive=False)
-        status_box.update(value="Loading model into memory...")
-        success, message = upscaler.load_model(lambda msg: status_box.update(value=msg))
+        loading_msg = "Loading model into memory..."
+        print(loading_msg)
+
+        def model_status(msg):
+            status_msg = f"Loading model: {msg}"
+            print(status_msg)
+            return status_msg
+
+        success, message = upscaler.load_model(model_status)
+        
         if success:
-            status_box.update(value="✅ Model loaded successfully! Ready to process images.")
-            button.update(interactive=True)
-            return "Model loaded successfully"
+            success_msg = "✅ Model loaded successfully! Ready to process images."
+            print(success_msg)
+            return success_msg, {"interactive": True}
         else:
-            status_box.update(value=f"❌ Failed to load model: {message}")
-            button.update(interactive=False)
-            return f"Failed to load model: {message}"
+            error_msg = f"❌ Failed to load model: {message}"
+            print(error_msg)
+            return error_msg, {"interactive": False}
     except Exception as e:
-        status_box.update(value=f"❌ Error loading model: {str(e)}")
-        button.update(interactive=False)
-        return f"Error loading model: {str(e)}"
+        error_msg = f"❌ Error loading model: {str(e)}"
+        print(error_msg)
+        return error_msg, {"interactive": False}
 
 def upscale_interface(
     input_image, 
@@ -408,7 +415,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
                     label="Seed (optional)",
                     placeholder="Leave empty for random seed"
                 )
-            upscale_btn = gr.Button("Upscale Image", variant="primary")
+            upscale_btn = gr.Button("Upscale Image", variant="primary", interactive=False)
 
         with gr.Column(scale=1):
             result_image = gr.Image(label="Result", format="jpg")  # Explicitly set format to jpg
@@ -420,8 +427,8 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
     
     # Event handlers
     demo.load(
-        fn=lambda: load_model_on_start(status_output, upscale_btn),
-        outputs=None,
+        fn=load_model_on_start,
+        outputs=[status_output, upscale_btn],
     )
     
     upscale_btn.click(
