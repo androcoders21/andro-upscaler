@@ -106,10 +106,6 @@ class ImageUpscaler:
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # Adjust exposure (-1 in Lightroom scale ≈ -15% brightness)
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.60)
-        
         # Adjust contrast (+25 in Lightroom scale ≈ 25% increase)
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(1.25)
@@ -256,7 +252,9 @@ class ImageUpscaler:
                 print(f"Model input dimensions: {w}x{h}")
             
             # Resize input image to model dimensions
+            print("original image size", input_image.size)
             input_image = input_image.resize((w, h), Image.LANCZOS)
+            print(f"Resized input image dimensions: {input_image.size}")
             
             if status_callback:
                 status_callback("Creating control image...")
@@ -388,6 +386,7 @@ def upscale_interface(
         os.makedirs(output_dir, exist_ok=True)
         filename = f"{output_dir}/upscaled_{uuid.uuid4().hex[:8]}.jpg"
         result_image.save(filename)
+        print("result image size", result_image.size)
         return result_image, f"{message}\n\nSaved to {filename}\n\nMonitoring Logs:\n{status_text}"
     else:
         return None, f"❌ {message}\n\nMonitoring Logs:\n{status_text}"
