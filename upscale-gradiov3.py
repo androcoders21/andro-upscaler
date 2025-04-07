@@ -231,27 +231,46 @@ class ImageUpscaler:
             
             input_image = input_image.convert("RGB")
             
-            # Get original dimensions
+            # Get original dimensions and store them
             orig_w, orig_h = input_image.size
             
-            # Calculate aspect ratio
-            aspect_ratio = orig_h / orig_w
+            # Process input dimensions
+            w, h = input_image.size
             
-            # Round width to nearest multiple of 16
-            w = round(orig_w / 16) * 16
-            # Calculate height maintaining aspect ratio and round to nearest multiple of 16
-            h = round(w * aspect_ratio / 16) * 16
+            # Handle width conditions first
+            if w > 576:
+                # Scale down if width is too large
+                scale = 576 / w
+                w = 576
+                h = int(h * scale)
+                input_image = input_image.resize((w, h), Image.LANCZOS)
+            elif w < 240:
+                # Scale up if width is too small
+                scale = 480 / w
+                w = 480
+                h = int(h * scale)
+                input_image = input_image.resize((w, h), Image.LANCZOS)
+            
+            # Create control image at upscaled dimensions
+            if status_callback:
+                status_callback("Creating upscaled control image...")
+            control_image = input_image.resize((w * upscale_factor, h * upscale_factor), Image.LANCZOS)
+            
+            # Ensure dimensions are multiples of 8 using floor division
+            w = (w // 8) * 8
+            h = (h // 8) * 8
             
             if status_callback:
-                status_callback(f"Processing image at {w}x{h} (multiples of 16)")
-                
-            # Resize to dimensions divisible by 16
-            control_image = input_image.resize((w, h), Image.LANCZOS)
+                status_callback(f"Processing at dimensions: {w}x{h}")
+                print(f"Model input dimensions: {w}x{h}")
+            
+            # Resize input image for model dimensions
+            input_image = input_image.resize((w, h), Image.LANCZOS)
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
             if status_callback:
-                status_callback("Upscaling started, monitoring resources...")
+                status_callback(f"Starting upscaling at model dimensions {w}x{h}")
             
             # Start memory monitoring with UI updates
             self.memory_monitor.start_monitoring(status_callback)
@@ -263,10 +282,14 @@ class ImageUpscaler:
                     controlnet_conditioning_scale=controlnet_conditioning_scale,
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
-                    height=control_image.size[1],
-                    width=control_image.size[0],
+                    height=h,
+                    width=w,
                     generator=generator,
                 ).images[0]
+                
+                # Get model output size before any modifications
+                output_w, output_h = output_image.size
+                status_callback(f"Model output size: {output_w}x{output_h}")
                 
                 # Apply CC effects to upscaled image if enabled
                 if apply_cc_preset:
@@ -274,10 +297,12 @@ class ImageUpscaler:
                         status_callback("Applying color correction...")
                     output_image = self.apply_cc_effects(output_image)
                 
-                # Resize output image back to original size
+                # Resize to original dimensions
+                status_callback(f"Resizing to original dimensions: {orig_w}x{orig_h}")
                 output_image = output_image.resize((orig_w, orig_h), Image.LANCZOS)
+                status_callback(f"Final image size: {output_image.size}")
                 
-                return output_image, f"Upscaling completed successfully with seed: {seed}"
+                return output_image, f"Upscaling completed successfully with seed: {seed}\nProcessed at {w}x{h} → {output_w}x{output_h} → {orig_w}x{orig_h}"
             
             finally:
                 if status_callback:
