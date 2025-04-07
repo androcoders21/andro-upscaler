@@ -279,20 +279,17 @@ class ImageUpscaler:
 # Create upscaler instance and autoload model
 upscaler = ImageUpscaler()
 
-def auto_load_model(status_component):
+def auto_load_model():
     if not upscaler.model_loaded:
-        status_text = ""
-        def status_callback(msg):
-            nonlocal status_text
-            status_text = msg
-            if status_component:
-                status_component.update(f"Loading model: {msg}")
+        status_text = "Loading model into memory..."
         
-        success, message = upscaler.load_model(status_callback)
+        success, message = upscaler.load_model(lambda msg: None)  # We'll handle updates differently
+        
         if success:
-            status_component.update(f"✅ Model loaded successfully\n\n{status_text}")
+            return f"✅ Model loaded successfully\n\n{message}"
         else:
-            status_component.update(f"❌ {message}")
+            return f"❌ {message}"
+    return "Model was already loaded"
 
 def upscale_interface(
     input_image, 
@@ -427,7 +424,7 @@ with gr.Blocks(title="FLUX.1 Image Upscaler") as demo:
     
     # Automatically load model on startup
     demo.load(
-        fn=lambda: auto_load_model(status),
+        fn=lambda: auto_load_model(),
         outputs=None
     )
     
