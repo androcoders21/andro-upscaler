@@ -233,7 +233,11 @@ class ImageUpscaler:
             
             # Prepare control image
             w, h = input_image.size
-            control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
+            # Scale down to 574px width and maintain aspect ratio
+            aspect_ratio = h / w
+            control_width = 574
+            control_height = int(control_width * aspect_ratio)
+            control_image = input_image.resize((control_width, control_height), Image.LANCZOS)
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
@@ -260,6 +264,10 @@ class ImageUpscaler:
                     if status_callback:
                         status_callback("Applying color correction...")
                     output_image = self.apply_cc_effects(output_image)
+                
+                # Resize output image back to original image size multiplied by upscale factor
+                original_upscaled_size = (w , h)
+                output_image = output_image.resize(original_upscaled_size, Image.LANCZOS)
                 
                 return output_image, f"Upscaling completed successfully with seed: {seed}"
             
