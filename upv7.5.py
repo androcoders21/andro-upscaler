@@ -428,7 +428,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
     # Event handlers
     demo.load(
         fn=load_model_on_start,
-        outputs=[status_output, upscale_btn],
+        outputs=[status_output, upscale_btn.update],
     )
     
     upscale_btn.click(
