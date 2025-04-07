@@ -105,10 +105,9 @@ class ImageUpscaler:
         # Convert to RGB if needed
         if img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # Adjust exposure (-1 in Lightroom scale ≈ -15% brightness)
+        # Adjust exposure (+0.15 in Lightroom scale ≈ 1 stop increase)
         enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(0.60)
+        img = enhancer.enhance(1.15)
         
         # Adjust contrast (+25 in Lightroom scale ≈ 25% increase)
         enhancer = ImageEnhance.Contrast(img)
@@ -231,10 +230,11 @@ class ImageUpscaler:
             
             input_image = input_image.convert("RGB")
             
-            # Prepare control image
-            w, h = input_image.size
-            control_image = input_image.resize((w * upscale_factor, h * upscale_factor))
-            
+            # Store original dimensions and prepare control image
+            original_width, original_height = input_image.size
+            print(f"Original image size: {original_width}x{original_height}")
+            control_image = input_image.resize((original_width * upscale_factor, original_height * upscale_factor))
+            print(f"Control image size: {control_image.size}")
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
             if status_callback:
@@ -244,6 +244,7 @@ class ImageUpscaler:
             self.memory_monitor.start_monitoring(status_callback)
             
             try:
+                # Generate upscaled image
                 output_image = self.pipe(
                     prompt=prompt,
                     control_image=control_image,
@@ -254,6 +255,9 @@ class ImageUpscaler:
                     width=control_image.size[0],
                     generator=generator,
                 ).images[0]
+
+                # Resize back to original dimensions
+                output_image = output_image.resize((original_width, original_height), Image.Resampling.LANCZOS)
                 
                 # Apply CC effects to upscaled image if enabled
                 if apply_cc_preset:
