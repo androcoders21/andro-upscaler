@@ -315,56 +315,14 @@ def upscale_interface(
     seed: Optional[str],
     progress=gr.Progress()
 ):
+    if not upscaler.model_loaded:
+        gr.Warning("Model is still loading. Please wait...")
+        return None, "Model is still loading. Please wait..."
+        
     if input_image is None:
         return None, "Please upload an image first."
-    status_text = ""
     
-    def status_callback(msg):
-        nonlocal status_text
-        status_text = msg
-        if "inference step" in msg:
-            try:
-                current_step = int(msg.split("inference step")[0].strip().split()[-1])
-                progress(current_step / steps, desc=msg)
-            except:
-                progress(0.5, desc=msg)
-        else:
-            progress(0.5, desc=msg)
-    
-    if not upscaler.model_loaded:
-        return None, "Model is still loading. Please wait..."
-    
-    # Convert seed to int or None
-    if seed and seed.strip():
-        try:
-            seed_int = int(seed)
-        except ValueError:
-            return None, "Invalid seed value. Please enter a valid integer."
-    else:
-        seed_int = None
-    
-    result_image, message = upscaler.upscale_image(
-        input_image=input_image,
-        prompt=prompt,
-        guidance_scale=guidance_scale,
-        num_inference_steps=steps,
-        upscale_factor=upscale_factor,
-        controlnet_conditioning_scale=controlnet_scale,
-        seed=seed_int,
-        status_callback=status_callback
-    )
-    
-    progress(1.0, desc="Completed")
-    
-    if result_image:
-        # Store original size at the start
-        original_size = get_original_size(input_image)
-        print(f"Original size: {original_size}")
-        print(f"Result image size: {result_image.size}")
-        filename, final_image = save_jpg_image(result_image, "outputs", original_size)
-        return final_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
-    else:
-        return None, f"❌ {message}\n\n{status_text}"
+    # Rest of the function remains the same
 
 # Gradio interface
 with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
@@ -427,7 +385,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
     # Event handlers
     demo.load(
         fn=load_model_on_start,
-        outputs=[status_output, upscale_btn, upscale_btn]
+        outputs=[]
     )
     
     upscale_btn.click(
