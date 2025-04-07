@@ -231,23 +231,22 @@ class ImageUpscaler:
             
             input_image = input_image.convert("RGB")
             
-            # Prepare control image
-            w, h = input_image.size
+            # Get original dimensions
+            orig_w, orig_h = input_image.size
             
-            # Calculate scaling factor to fit within 1280px bounds
-            scale = min(1280 / w, 1280 / h)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
+            # Calculate aspect ratio
+            aspect_ratio = orig_h / orig_w
             
-            # Round to nearest multiple of 16
-            new_w = round(new_w / 16) * 16
-            new_h = round(new_h / 16) * 16
+            # Round width to nearest multiple of 16
+            w = round(orig_w / 16) * 16
+            # Calculate height maintaining aspect ratio and round to nearest multiple of 16
+            h = round(w * aspect_ratio / 16) * 16
             
             if status_callback:
-                status_callback(f"Resizing image to {new_w}x{new_h} (multiples of 16)")
+                status_callback(f"Processing image at {w}x{h} (multiples of 16)")
                 
-            control_image = input_image.resize((new_w, new_h), Image.LANCZOS)
-            print(f"Control image size: {control_image.size} image {control_image}")
+            # Resize to dimensions divisible by 16
+            control_image = input_image.resize((w, h), Image.LANCZOS)
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
@@ -275,11 +274,8 @@ class ImageUpscaler:
                         status_callback("Applying color correction...")
                     output_image = self.apply_cc_effects(output_image)
                 
-                # Resize output image back to original image size multiplied by upscale factor
-                original_upscaled_size = (w , h)
-                print(f"Original image size: {original_upscaled_size}")
-                print(f"Output image size before resize: {output_image.size}")
-                output_image = output_image.resize(original_upscaled_size, Image.LANCZOS)
+                # Resize output image back to original size
+                output_image = output_image.resize((orig_w, orig_h), Image.LANCZOS)
                 
                 return output_image, f"Upscaling completed successfully with seed: {seed}"
             
