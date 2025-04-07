@@ -252,7 +252,7 @@ class ImageUpscaler:
             logger.error(error_msg)
             return None, error_msg
 
-def save_jpg_image(image: Image.Image, output_dir: str, original_size: tuple) -> str:
+def save_jpg_image(image: Image.Image, output_dir: str, original_size: tuple) -> Tuple[str, Image.Image]:
     """Save image as JPG with quality=95 after resizing to original dimensions"""
     os.makedirs(output_dir, exist_ok=True)
     filename = f"{output_dir}/upscaled_{uuid.uuid4().hex[:8]}.jpg"
@@ -266,9 +266,10 @@ def save_jpg_image(image: Image.Image, output_dir: str, original_size: tuple) ->
         image = image.resize(original_size, Image.Resampling.LANCZOS)
     
     # Save with high quality JPG settings
-    print(f"Saving image to {filename} after resizing size {original_size}")
+    print(f"Saving image to {filename} at size {original_size}")
     image.save(filename, format='JPEG', quality=95, optimize=True)
-    return filename
+    
+    return filename, image
 
 def get_original_size(image: Image.Image) -> tuple:
     """Get original dimensions before any processing"""
@@ -334,8 +335,8 @@ def upscale_interface(
         original_size = get_original_size(input_image)
         print(f"Original size: {original_size}")
         print(f"Result image size: {result_image.size}")
-        filename = save_jpg_image(result_image, "outputs", original_size)
-        return result_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
+        filename, final_image = save_jpg_image(result_image, "outputs", original_size)
+        return final_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
     else:
         return None, f"❌ {message}\n\n{status_text}"
 
