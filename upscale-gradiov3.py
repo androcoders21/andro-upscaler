@@ -238,6 +238,7 @@ class ImageUpscaler:
             control_width = 574
             control_height = int(control_width * aspect_ratio)
             control_image = input_image.resize((control_width, control_height), Image.LANCZOS)
+            print(f"Control image size: {control_image.size} image {control_image}")
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
@@ -267,6 +268,8 @@ class ImageUpscaler:
                 
                 # Resize output image back to original image size multiplied by upscale factor
                 original_upscaled_size = (w , h)
+                print(f"Original image size: {original_upscaled_size}")
+                print(f"Output image size before resize: {output_image.size}")
                 output_image = output_image.resize(original_upscaled_size, Image.LANCZOS)
                 
                 return output_image, f"Upscaling completed successfully with seed: {seed}"
