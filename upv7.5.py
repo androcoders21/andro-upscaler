@@ -252,6 +252,27 @@ class ImageUpscaler:
             logger.error(error_msg)
             return None, error_msg
 
+def save_jpg_image(image: Image.Image, output_dir: str, original_size: tuple) -> str:
+    """Save image as JPG with quality=95 after resizing to original dimensions"""
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"{output_dir}/upscaled_{uuid.uuid4().hex[:8]}.jpg"
+    
+    # Ensure RGB mode
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Resize back to original dimensions
+    if image.size != original_size:
+        image = image.resize(original_size, Image.Resampling.LANCZOS)
+    
+    # Save with high quality JPG settings
+    image.save(filename, format='JPEG', quality=95, optimize=True)
+    return filename
+
+def get_original_size(image: Image.Image) -> tuple:
+    """Get original dimensions before any processing"""
+    return image.size
+
 def upscale_interface(
     input_image, 
     prompt: str,
@@ -308,22 +329,17 @@ def upscale_interface(
     progress(1.0, desc="Completed")
     
     if result_image:
-        # Ensure image is RGB and save as JPEG
-        if result_image.mode != 'RGB':
-            result_image = result_image.convert('RGB')
-        
-        output_dir = "outputs"
-        os.makedirs(output_dir, exist_ok=True)
-        filename = f"{output_dir}/upscaled_{uuid.uuid4().hex[:8]}.jpg"
-        result_image.save(filename, format='JPEG', quality=95)
+        # Store original size at the start
+        original_size = get_original_size(input_image)
+        filename = save_jpg_image(result_image, "outputs", original_size)
         return result_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
     else:
         return None, f"❌ {message}\n\n{status_text}"
 
 # Gradio interface
-with gr.Blocks(title="FLUX Image Upscaler v7 good") as demo:
-    gr.Markdown("# FLUX Image Upscaler v7 good")
-    gr.Markdown("Memory-efficient upscaling that maintains input image dimensions")
+with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
+    gr.Markdown("# FLUX Image Upscaler v7.5")
+    gr.Markdown("Memory-efficient upscaling with JPG output format")
     
     with gr.Row():
         with gr.Column(scale=1):
@@ -371,7 +387,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7 good") as demo:
             upscale_btn = gr.Button("Upscale Image", variant="primary")
 
         with gr.Column(scale=1):
-            result_image = gr.Image(label="Result")
+            result_image = gr.Image(label="Result", format="jpg")  # Explicitly set format to jpg
             status = gr.TextArea(
                 label="Status",
                 placeholder="Status will appear here...",
