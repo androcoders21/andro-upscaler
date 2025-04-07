@@ -372,7 +372,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
                     label="Seed (optional)",
                     placeholder="Leave empty for random seed"
                 )
-            upscale_btn = gr.Button("Loading Model...", variant="primary", interactive=False)
+            upscale_btn = gr.Button("Loading Model...", variant="primary")
 
         with gr.Column(scale=1):
             result_image = gr.Image(label="Result", format="jpg")  # Explicitly set format to jpg
