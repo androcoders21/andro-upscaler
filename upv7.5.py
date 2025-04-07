@@ -295,15 +295,16 @@ def load_model_on_start():
         if success:
             success_msg = "✅ Model loaded successfully! Ready to process images."
             print(success_msg)
-            return success_msg, gr.update(value="Upscale Image", interactive=True)
+            return success_msg, "Upscale Image"
         else:
             error_msg = f"❌ Failed to load model: {message}"
             print(error_msg)
-            return error_msg, gr.update(value="Loading Model...", interactive=False)
+            return error_msg, "Upscale Image"
     except Exception as e:
         error_msg = f"❌ Error loading model: {str(e)}"
         print(error_msg)
-        return error_msg, gr.update(value="Loading Model...", interactive=False)
+        return error_msg, "Upscale Image"
+
 def upscale_interface(
     input_image, 
     prompt: str,
@@ -414,7 +415,7 @@ with gr.Blocks(title="FLUX Image Upscaler v7.5") as demo:
                     label="Seed (optional)",
                     placeholder="Leave empty for random seed"
                 )
-            upscale_btn = gr.Button("Loading Model...", variant="primary", interactive=False)
+            upscale_btn = gr.Button("Upscale Image", variant="primary")
 
         with gr.Column(scale=1):
             result_image = gr.Image(label="Result", format="jpg")  # Explicitly set format to jpg
