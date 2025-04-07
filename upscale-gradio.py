@@ -313,7 +313,8 @@ def upscale_interface(
     progress=gr.Progress()
 ):
     if input_image is None:
-        return None, "Please upload an image first."
+        gr.Error("No input image provided.")
+        return None, "No input image provided."
     
     progress(0.1, desc="Starting upscaling")
     status_text = ""
@@ -357,10 +358,14 @@ def upscale_interface(
     
     # Save the image with a unique filename
     if result_image:
+        # Ensure image is in RGB mode and convert to JPG
+        if result_image.mode != 'RGB':
+            result_image = result_image.convert('RGB')
+        
         output_dir = "outputs"
         os.makedirs(output_dir, exist_ok=True)
         filename = f"{output_dir}/upscaled_{uuid.uuid4().hex[:8]}.jpg"
-        result_image.save(filename)
+        result_image.save(filename, format='JPEG', quality=95)
         return result_image, f"{message}\n\nSaved to {filename}\n\n{status_text}"
     else:
         return None, f"❌ {message}\n\n{status_text}"
