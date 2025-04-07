@@ -234,38 +234,33 @@ class ImageUpscaler:
             # Get original dimensions and store them
             orig_w, orig_h = input_image.size
             
-            # Process input dimensions
+            # Calculate target dimensions
             w, h = input_image.size
             
-            # Handle width conditions first
+            # Handle width constraints
             if w > 576:
-                # Scale down if width is too large
                 scale = 576 / w
                 w = 576
                 h = int(h * scale)
-                input_image = input_image.resize((w, h), Image.LANCZOS)
             elif w < 240:
-                # Scale up if width is too small
                 scale = 480 / w
                 w = 480
                 h = int(h * scale)
-                input_image = input_image.resize((w, h), Image.LANCZOS)
             
-            # Create control image at upscaled dimensions
-            if status_callback:
-                status_callback("Creating upscaled control image...")
-            control_image = input_image.resize((w * upscale_factor, h * upscale_factor), Image.LANCZOS)
-            
-            # Ensure dimensions are multiples of 8 using floor division
-            w = (w // 8) * 8
-            h = (h // 8) * 8
+            # Ensure dimensions are multiples of 16
+            w = (w // 16) * 16
+            h = (h // 16) * 16
             
             if status_callback:
                 status_callback(f"Processing at dimensions: {w}x{h}")
                 print(f"Model input dimensions: {w}x{h}")
             
-            # Resize input image for model dimensions
+            # Resize input image to model dimensions
             input_image = input_image.resize((w, h), Image.LANCZOS)
+            
+            if status_callback:
+                status_callback("Creating control image...")
+            control_image = input_image.resize((w * upscale_factor, h * upscale_factor), Image.LANCZOS)
             
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
