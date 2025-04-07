@@ -234,8 +234,8 @@ class ImageUpscaler:
             # Prepare control image
             w, h = input_image.size
             
-            # Calculate scaling factor to fit within 574px bounds
-            scale = min(574 / w, 574 / h)
+            # Calculate scaling factor to fit within 1280px bounds
+            scale = min(1280 / w, 1280 / h)
             new_w = int(w * scale)
             new_h = int(h * scale)
             
