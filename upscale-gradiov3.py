@@ -239,12 +239,12 @@ class ImageUpscaler:
             new_w = int(w * scale)
             new_h = int(h * scale)
             
-            # Round to nearest multiple of 8
-            new_w = round(new_w / 8) * 8
-            new_h = round(new_h / 8) * 8
+            # Round to nearest multiple of 16
+            new_w = round(new_w / 16) * 16
+            new_h = round(new_h / 16) * 16
             
             if status_callback:
-                status_callback(f"Resizing image to {new_w}x{new_h} (multiples of 8)")
+                status_callback(f"Resizing image to {new_w}x{new_h} (multiples of 16)")
                 
             control_image = input_image.resize((new_w, new_h), Image.LANCZOS)
             print(f"Control image size: {control_image.size} image {control_image}")
