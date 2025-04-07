@@ -230,11 +230,17 @@ class ImageUpscaler:
             
             input_image = input_image.convert("RGB")
             
-            # Store original dimensions and prepare control image
+            # Store original dimensions
             original_width, original_height = input_image.size
             print(f"Original image size: {original_width}x{original_height}")
-            control_image = input_image.resize((original_width * upscale_factor, original_height * upscale_factor))
-            print(f"Control image size: {control_image.size}")
+            
+            # Calculate dimensions for control image that will be divisible by 16 after upscaling
+            base_width = ((original_width + 15) // 16) * 16
+            base_height = ((original_height + 15) // 16) * 16
+            
+            # Prepare control image with upscaled dimensions that are divisible by 16
+            control_image = input_image.resize((base_width * upscale_factor, base_height * upscale_factor))
+            print(f"Control image size (divisible by 16): {control_image.size}")
             generator = torch.Generator(device=self.device).manual_seed(seed)
             
             if status_callback:
